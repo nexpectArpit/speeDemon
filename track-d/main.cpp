@@ -53,5 +53,5 @@ for(uint32_t e=ro[v];e<ro[v+1];++e){uint32_t u=re[e].to;uint64_t nd=d+re[e].w;if
 ans[q]=(mu==INF)?-1:int64_t(mu);for(uint32_t nd:vs){fd[nd]=INF;rd[nd]=INF;}vs.clear();fh.cl();rh.cl();}});
 std::string out;out.reserve(NQ*12);char buf[24];
 for(size_t q=0;q<NQ;++q){if(ans[q]<0)out+="-1\n";else{out.append(buf,std::to_chars(buf,buf+24,uint64_t(ans[q])).ptr);out+='\n';}}
-std::filesystem::create_directories(od);FILE*f=fopen((std::string(od)+"/distances.txt").c_str(),"wb");fwrite(out.data(),1,out.size(),f);fclose(f);return 0;}
+std::filesystem::create_directories(od);FILE*f=fopen((std::string(od)+"/distances.txt").c_str(),"wb");fwrite(out.data(),1,out.size(),f);fclose(f);_exit(0);}
 catch(std::exception&e){fprintf(stderr,"%s\n",e.what());return 1;}}
