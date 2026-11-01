@@ -197,15 +197,23 @@ int main(int ac, char** av) {
         bn[i] = p;
     }
 
+    struct DocSpan { uint32_t doc_id; uint16_t count; };
+    std::vector<std::vector<DocSpan>> th_doc_spans(W);
+    std::vector<std::vector<uint32_t>> th_tids(W);
     std::vector<std::vector<uint32_t>> th_df(W, std::vector<uint32_t>(NT, 0));
 
     par(W, [&](size_t wid) {
         const char* sc = bn[wid], * end = bn[wid + 1];
         auto& l_df = th_df[wid];
+        auto& l_spans = th_doc_spans[wid];
+        auto& l_tids = th_tids[wid];
+        l_spans.reserve((ND / W) + 1024);
+        l_tids.reserve((ND / W) * 50);
+
         std::vector<uint32_t> last_doc(NT, ~0u);
         char tok_buf[32];
         struct L1F { uint64_t hash = 0; uint32_t tid = ~0u; };
-        std::vector<L1F> l1(8192);
+        std::vector<L1F> l1(16384);
 
         while (sc < end) {
             uint32_t id = 0;
@@ -219,6 +227,7 @@ int main(int ac, char** av) {
             dr[id] = {ts, len};
 
             const char* tp = ts, * te = ts + len;
+            uint16_t doc_term_count = 0;
             while (tp < te) {
                 while (tp < te && !CHAR_MAP[(uint8_t)*tp]) ++tp;
                 if (tp >= te) break;
@@ -228,7 +237,7 @@ int main(int ac, char** av) {
                 if (tl <= 32) {
                     for (size_t i = 0; i < tl; ++i) tok_buf[i] = CHAR_MAP[(uint8_t)tok_st[i]];
                     uint64_t h64 = fast_hash(tok_buf, tl);
-                    uint32_t lidx = uint32_t(h64) & 8191;
+                    uint32_t lidx = uint32_t(h64) & 16383;
                     uint32_t tid;
                     if (l1[lidx].hash == h64) {
                         tid = l1[lidx].tid;
@@ -239,8 +248,13 @@ int main(int ac, char** av) {
                     if (tid != ~0u && last_doc[tid] != id) {
                         last_doc[tid] = id;
                         l_df[tid]++;
+                        l_tids.push_back(tid);
+                        doc_term_count++;
                     }
                 }
+            }
+            if (doc_term_count > 0) {
+                l_spans.push_back({id, doc_term_count});
             }
         }
     });
@@ -282,50 +296,29 @@ int main(int ac, char** av) {
     uint32_t total_array_postings = pos_off[NT];
     std::vector<uint32_t> all_postings(total_array_postings);
 
+    // Fast In-Memory Pass 2: no docs.txt re-reading or re-tokenizing!
     par(W, [&](size_t wid) {
-        const char* sc = bn[wid], * end = bn[wid + 1];
         auto& l_off = th_off[wid];
-        std::vector<uint32_t> last_doc(NT, ~0u);
-        char tok_buf[32];
-        struct L1F { uint64_t hash = 0; uint32_t tid = ~0u; };
-        std::vector<L1F> l1(8192);
-
-        while (sc < end) {
-            uint32_t id = 0;
-            while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
-            sc = dr[id].p + dr[id].l + 1;
-            const char* tp = dr[id].p, * te = tp + dr[id].l;
-            while (tp < te) {
-                while (tp < te && !CHAR_MAP[(uint8_t)*tp]) ++tp;
-                if (tp >= te) break;
-                const char* tok_st = tp;
-                while (tp < te && CHAR_MAP[(uint8_t)*tp]) ++tp;
-                size_t tl = size_t(tp - tok_st);
-                if (tl <= 32) {
-                    for (size_t i = 0; i < tl; ++i) tok_buf[i] = CHAR_MAP[(uint8_t)tok_st[i]];
-                    uint64_t h64 = fast_hash(tok_buf, tl);
-                    uint32_t lidx = uint32_t(h64) & 8191;
-                    uint32_t tid;
-                    if (l1[lidx].hash == h64) {
-                        tid = l1[lidx].tid;
-                    } else {
-                        tid = dt.fn_fast(h64);
-                        l1[lidx] = {h64, tid};
-                    }
-                    if (tid != ~0u && last_doc[tid] != id) {
-                        last_doc[tid] = id;
-                        uint32_t bs_id = bitset_map[tid];
-                        if (bs_id != ~0u) {
-                            auto* word = (std::atomic<uint64_t>*)&bitsets[bs_id][id >> 6];
-                            word->fetch_or(1ULL << (id & 63), std::memory_order_relaxed);
-                        } else {
-                            all_postings[l_off[tid]++] = id;
-                        }
-                    }
+        const auto& l_spans = th_doc_spans[wid];
+        const auto& l_tids = th_tids[wid];
+        size_t tid_idx = 0;
+        for (const auto& span : l_spans) {
+            uint32_t id = span.doc_id;
+            uint16_t cnt = span.count;
+            for (uint16_t k = 0; k < cnt; ++k) {
+                uint32_t tid = l_tids[tid_idx++];
+                uint32_t bs_id = bitset_map[tid];
+                if (bs_id != ~0u) {
+                    bitsets[bs_id][id >> 6] |= (1ULL << (id & 63));
+                } else {
+                    all_postings[l_off[tid]++] = id;
                 }
             }
         }
     });
+
+    std::vector<std::vector<DocSpan>>().swap(th_doc_spans);
+    std::vector<std::vector<uint32_t>>().swap(th_tids);
     std::vector<std::vector<uint32_t>>().swap(th_off);
 
     auto get_pos = [&](uint32_t t) -> std::pair<const uint32_t*, size_t> {

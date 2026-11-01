@@ -31,7 +31,6 @@ struct MF {
 struct Edge { uint32_t to = 0, w = 0; };
 struct Q { uint32_t s = 0, t = 0; };
 
-// 4-ary heap for fewer cache misses
 struct HP {
     std::vector<std::pair<uint64_t, uint32_t>> d;
     HP() { d.reserve(16384); }
@@ -55,7 +54,6 @@ struct HP {
         auto b = d.back();
         d.pop_back();
         if (!d.empty()) {
-            d[0] = b;
             size_t i = 0, n = d.size();
             while (true) {
                 size_t c0 = (i << 2) + 1;
@@ -68,10 +66,7 @@ struct HP {
                 if (d[s].first < b.first) {
                     d[i] = d[s];
                     i = s;
-                } else {
-                    d[i] = b;
-                    break;
-                }
+                } else break;
             }
             d[i] = b;
         }
@@ -79,38 +74,68 @@ struct HP {
     }
 };
 
-struct DS {
-    struct State { uint64_t f = INF, r = INF; uint32_t key = ~0u; };
-    std::vector<State> table;
-    std::vector<uint32_t> used;
-    DS() : table(1024) { used.reserve(512); }
-    uint32_t slot(uint32_t u) const { return (u * 2654435761u) & uint32_t(table.size() - 1); }
-    void grow() {
-        auto old = std::move(table);
-        table = std::vector<State>(old.size() * 2);
-        used.clear();
-        used.reserve(table.size() / 2);
-        for (const auto& state : old) if (state.key != ~0u) {
-            uint32_t x = slot(state.key);
-            while (table[x].key != ~0u) x = (x + 1) & uint32_t(table.size() - 1);
-            table[x] = state;
-            used.push_back(x);
-        }
+static constexpr size_t PAGE_BITS = 10;
+static constexpr size_t PAGE_SIZE = 1ULL << PAGE_BITS; // 1024 nodes
+static constexpr size_t PAGE_MASK = PAGE_SIZE - 1;
+
+struct Page {
+    uint64_t f[PAGE_SIZE];
+    uint64_t r[PAGE_SIZE];
+};
+
+struct PagedDistances {
+    std::vector<Page*> dir;
+    std::vector<uint32_t> touched;
+    std::vector<Page*> pool;
+    size_t pool_idx = 0;
+
+    PagedDistances(size_t max_nodes) : dir((max_nodes + PAGE_SIZE - 1) / PAGE_SIZE, nullptr) {
+        touched.reserve(256);
+        pool.resize(64);
+        for (auto& p : pool) p = new Page();
     }
-    State& get(uint32_t u) {
-        uint32_t x = slot(u);
-        while (table[x].key != ~0u && table[x].key != u)
-            x = (x + 1) & uint32_t(table.size() - 1);
-        if (table[x].key == ~0u) {
-            if ((used.size() + 1) * 2 > table.size()) { grow(); return get(u); }
-            table[x] = {INF, INF, u};
-            used.push_back(x);
-        }
-        return table[x];
+
+    ~PagedDistances() {
+        for (auto* p : pool) delete p;
     }
-    void clear() {
-        for (uint32_t x : used) table[x].key = ~0u;
-        used.clear();
+
+    inline Page* alloc_page(uint32_t pidx) {
+        if (pool_idx == pool.size()) pool.push_back(new Page());
+        Page* p = pool[pool_idx++];
+        std::memset(p, 0xFF, sizeof(Page));
+        dir[pidx] = p;
+        touched.push_back(pidx);
+        return p;
+    }
+
+    inline uint64_t get_f(uint32_t u) {
+        Page* p = dir[u >> PAGE_BITS];
+        return p ? p->f[u & PAGE_MASK] : INF;
+    }
+
+    inline uint64_t get_r(uint32_t u) {
+        Page* p = dir[u >> PAGE_BITS];
+        return p ? p->r[u & PAGE_MASK] : INF;
+    }
+
+    inline void set_f(uint32_t u, uint64_t d) {
+        uint32_t pidx = u >> PAGE_BITS;
+        Page* p = dir[pidx];
+        if (!p) p = alloc_page(pidx);
+        p->f[u & PAGE_MASK] = d;
+    }
+
+    inline void set_r(uint32_t u, uint64_t d) {
+        uint32_t pidx = u >> PAGE_BITS;
+        Page* p = dir[pidx];
+        if (!p) p = alloc_page(pidx);
+        p->r[u & PAGE_MASK] = d;
+    }
+
+    inline void clear() {
+        for (uint32_t pidx : touched) dir[pidx] = nullptr;
+        touched.clear();
+        pool_idx = 0;
     }
 };
 
@@ -227,19 +252,20 @@ int main(int ac, char** av) {
     size_t NQ = qs.size();
     std::vector<int64_t> ans(NQ, -1);
 
-    size_t QW = std::min<size_t>(W, 6);
+    size_t QW = W;
     struct WS {
-        DS distances;
+        PagedDistances distances;
         HP fh, rh;
+        WS(size_t n) : distances(n) {}
     };
     std::vector<WS> ws;
     ws.reserve(QW);
-    for (size_t w = 0; w < QW; ++w) ws.emplace_back();
+    for (size_t w = 0; w < QW; ++w) ws.emplace_back(n);
     std::atomic<size_t> qi{0};
 
     par(QW, [&](size_t wid) {
         WS& st = ws[wid];
-        auto& distances = st.distances;
+        auto& dist = st.distances;
         auto& fh = st.fh;
         auto& rh = st.rh;
 
@@ -248,8 +274,8 @@ int main(int ac, char** av) {
             if (s == t) { ans[q] = 0; continue; }
             if (s >= n || t >= n || fo[s] == fo[s + 1] || ro[t] == ro[t + 1]) { ans[q] = -1; continue; }
 
-            distances.get(s).f = 0;
-            distances.get(t).r = 0;
+            dist.set_f(s, 0);
+            dist.set_r(t, 0);
             fh.ps(0, s);
             rh.ps(0, t);
             uint64_t mu = INF;
@@ -262,34 +288,34 @@ int main(int ac, char** av) {
 
                 if (go_fwd) {
                     auto [d, u] = fh.pp();
-                    if (d > distances.get(u).f || d >= mu) continue;
+                    if (d > dist.get_f(u) || d >= mu) continue;
                     for (uint32_t e = fo[u], en = fo[u + 1]; e < en; ++e) {
                         uint32_t v = fe[e].to;
                         uint64_t nd = d + fe[e].w;
-                        auto& state = distances.get(v);
-                        if (nd < state.f) {
-                            state.f = nd;
+                        if (nd < dist.get_f(v)) {
+                            dist.set_f(v, nd);
                             fh.ps(nd, v);
-                            if (state.r != INF && nd + state.r < mu) mu = nd + state.r;
+                            uint64_t rv = dist.get_r(v);
+                            if (rv != INF && nd + rv < mu) mu = nd + rv;
                         }
                     }
                 } else {
                     auto [d, v] = rh.pp();
-                    if (d > distances.get(v).r || d >= mu) continue;
+                    if (d > dist.get_r(v) || d >= mu) continue;
                     for (uint32_t e = ro[v], en = ro[v + 1]; e < en; ++e) {
                         uint32_t u = re[e].to;
                         uint64_t nd = d + re[e].w;
-                        auto& state = distances.get(u);
-                        if (nd < state.r) {
-                            state.r = nd;
+                        if (nd < dist.get_r(u)) {
+                            dist.set_r(u, nd);
                             rh.ps(nd, u);
-                            if (state.f != INF && state.f + nd < mu) mu = state.f + nd;
+                            uint64_t fu = dist.get_f(u);
+                            if (fu != INF && fu + nd < mu) mu = fu + nd;
                         }
                     }
                 }
             }
             ans[q] = (mu == INF) ? -1 : int64_t(mu);
-            distances.clear();
+            dist.clear();
             fh.cl();
             rh.cl();
         }

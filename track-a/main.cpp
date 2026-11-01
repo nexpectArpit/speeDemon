@@ -30,13 +30,6 @@ struct DE {
     uint16_t id = 0;
 };
 
-#pragma pack(push, 2)
-struct Rec {
-    uint32_t lat;
-    uint16_t ep_err; // bit 15 is err, bits 0..14 is ep
-};
-#pragma pack(pop)
-
 inline uint64_t fast_hash(const char* s, uint16_t l) {
 #if defined(__x86_64__) || defined(_M_X64)
     uint64_t h = l;
@@ -68,8 +61,14 @@ inline uint64_t fast_hash(const char* s, uint16_t l) {
 struct Sh {
     DE tb[TS]{};
     std::vector<std::string_view> ep;
-    std::vector<Rec> recs;
-    std::array<uint32_t, H + 1> h_off{};
+    std::array<std::vector<uint32_t>, H> hr_lat;
+    std::array<std::vector<uint16_t>, H> hr_ep;
+    std::vector<std::vector<uint32_t>> hr_err;
+
+    Sh() {
+        ep.reserve(2048);
+        hr_err.resize(H);
+    }
 
     uint16_t in(const char* s, uint16_t l) {
         uint64_t h = fast_hash(s, l);
@@ -92,20 +91,18 @@ inline size_t hi(const char* t) {
 }
 
 void pc(const char* c, const char* e, Sh& s) {
-    size_t est_lines = (e - c) / 75 + 4096;
-    std::vector<Rec> raw;
-    raw.reserve(est_lines);
-    std::vector<uint8_t> raw_h;
-    raw_h.reserve(est_lines);
-    uint32_t h_cnt[H]{};
-
     struct L1EP { const char* p = nullptr; uint16_t l = 0; uint16_t id = 0; };
-    L1EP l1[256]{};
+    L1EP l1[2048]{};
+
+    auto ensure_err_row = [&](size_t h, size_t needed) {
+        if (s.hr_err[h].size() < needed) {
+            s.hr_err[h].resize(std::max(needed, s.hr_err[h].size() + 256), 0);
+        }
+    };
 
     while (c < e) {
         size_t h = hi(c);
         c += 28;
-        // Fast method skip: GET/PUT(3), POST/HEAD(4), PATCH(5), DELETE(6), OPTIONS(7)
         if (c[0] == 'G' || (c[0] == 'P' && c[1] == 'U')) c += 4;
         else if (c[0] == 'H' || (c[0] == 'P' && c[1] == 'O')) c += 5;
         else if (c[0] == 'P') c += 6;
@@ -116,8 +113,7 @@ void pc(const char* c, const char* e, Sh& s) {
         const char* sp = (const char*)memchr(es, ' ', 128);
         uint16_t el = uint16_t(sp - es);
 
-        // L1 cache check
-        uint8_t l1_idx = uint8_t(uint8_t(es[0]) ^ uint8_t(el) ^ uint8_t(es[el - 1]));
+        uint16_t l1_idx = uint16_t((uint8_t(es[0]) * 31 + el * 7 + uint8_t(es[el - 1])) & 2047);
         uint16_t ei;
         if (l1[l1_idx].l == el && !memcmp(l1[l1_idx].p, es, el)) {
             ei = l1[l1_idx].id;
@@ -127,25 +123,21 @@ void pc(const char* c, const char* e, Sh& s) {
         }
         c = sp + 1;
 
-        uint16_t err_flag = (c[0] == '5') ? 0x8000 : 0;
+        bool is_err = (c[0] == '5');
         c += 4;
-        uint32_t l = 0;
+        uint32_t lat = 0;
         while (*c != '\n') {
-            l = l * 10 + uint32_t(*c - '0');
+            lat = lat * 10 + uint32_t(*c - '0');
             ++c;
         }
         ++c;
-        raw.push_back({l, uint16_t(ei | err_flag)});
-        raw_h.push_back(uint8_t(h));
-        h_cnt[h]++;
-    }
 
-    s.h_off[0] = 0;
-    for (size_t h = 0; h < H; ++h) s.h_off[h + 1] = s.h_off[h] + h_cnt[h];
-    s.recs.resize(raw.size());
-    auto cur_off = s.h_off;
-    for (size_t i = 0; i < raw.size(); ++i) {
-        s.recs[cur_off[raw_h[i]]++] = raw[i];
+        s.hr_lat[h].push_back(lat);
+        s.hr_ep[h].push_back(ei);
+        if (is_err) {
+            ensure_err_row(h, ei + 1);
+            s.hr_err[h][ei]++;
+        }
     }
 }
 
@@ -167,10 +159,8 @@ int main(int ac, char** av) {
     }
     if (sz < 65536) W = 1;
 
-    // Precompute all 72 hour strings
     std::array<std::string, H> gh;
     {
-        // 2026-10-30T18:00:00Z to 2026-11-02T17:00:00Z
         int day = 30, hr = 18, m = 10;
         for (size_t h = 0; h < H; ++h) {
             char b[32];
@@ -221,40 +211,47 @@ int main(int ac, char** av) {
     size_t ne = ge.size();
     std::array<std::string, H> ob;
     std::atomic<size_t> hc{0};
+
     auto work = [&](size_t) {
         std::vector<uint32_t> ec(ne, 0), ee(ne, 0), eo(ne + 1, 0);
         std::vector<uint32_t> la;
         la.reserve(65536);
+
         for (size_t h = hc.fetch_add(1); h < H; h = hc.fetch_add(1)) {
             size_t tr = 0;
             std::fill(ec.begin(), ec.end(), 0);
             std::fill(ee.begin(), ee.end(), 0);
+
             for (size_t w = 0; w < W; ++w) {
-                uint32_t st_i = sh[w].h_off[h], en_i = sh[w].h_off[h + 1];
-                tr += (en_i - st_i);
-                const Rec* r_ptr = sh[w].recs.data();
+                const auto& ep_vec = sh[w].hr_ep[h];
+                tr += ep_vec.size();
                 const uint16_t* sr_ptr = sr[w].data();
-                for (uint32_t i = st_i; i < en_i; ++i) {
-                    uint16_t raw_val = r_ptr[i].ep_err;
-                    uint16_t g = sr_ptr[raw_val & 0x7FFF];
-                    ec[g]++;
-                    ee[g] += (raw_val >> 15);
+                for (uint16_t loc_ep : ep_vec) {
+                    ec[sr_ptr[loc_ep]]++;
+                }
+                const auto& err_vec = sh[w].hr_err[h];
+                for (size_t loc_ep = 0; loc_ep < err_vec.size(); ++loc_ep) {
+                    if (err_vec[loc_ep]) ee[sr_ptr[loc_ep]] += err_vec[loc_ep];
                 }
             }
+
             if (!tr) continue;
             eo[0] = 0;
             for (size_t e = 0; e < ne; ++e) eo[e + 1] = eo[e] + ec[e];
             la.resize(tr);
             auto co = eo;
+
             for (size_t w = 0; w < W; ++w) {
-                uint32_t st_i = sh[w].h_off[h], en_i = sh[w].h_off[h + 1];
-                const Rec* r_ptr = sh[w].recs.data();
+                const auto& lat_vec = sh[w].hr_lat[h];
+                const auto& ep_vec = sh[w].hr_ep[h];
                 const uint16_t* sr_ptr = sr[w].data();
-                for (uint32_t i = st_i; i < en_i; ++i) {
-                    uint16_t g = sr_ptr[r_ptr[i].ep_err & 0x7FFF];
-                    la[co[g]++] = r_ptr[i].lat;
+                size_t n = lat_vec.size();
+                for (size_t i = 0; i < n; ++i) {
+                    uint16_t g = sr_ptr[ep_vec[i]];
+                    la[co[g]++] = lat_vec[i];
                 }
             }
+
             auto& buf = ob[h];
             buf.reserve(ne * 85);
             for (size_t e = 0; e < ne; ++e) {
