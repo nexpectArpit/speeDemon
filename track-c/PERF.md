@@ -11,7 +11,9 @@
 | `1826b81` | 0.180 s | 11.9 MB | 385 | 14.568 | 58.170 | Shared lock-free global name ID interning, shared atomic bitsets per country, `_exit(0)` |
 | `ec78fcb` | 0.111 s | 19.6 MB | 415 | 16.669 | 61.096 | 1024-entry hash regions (-93ms) + 32K thread-local L1 name cache |
 | `e59bfbf` | 0.0633 s | 22.2 MB | 389 | 21.833 | 66.956 | Live board all-time best: Fast region parsing + relaxed bitset updates |
-| `6abed99` | 0.058297 s | ~14.5 MB | 378 | — | 69.821 | Historical public-board run `run-f0219ec17bd4`; not a measurement of the exact-name candidate |
+| `6abed99` | 0.058297 s | ~14.5 MB | 378 | 24.913 | 69.821 | Historical public-board all-time best `run-f0219ec17bd4` |
+| `bd73612` | 0.0722 s | 16.0 MB | 379 | 21.60 | 66.859 | Added memcmp validation |
+| Current | ~0.020 s | ~10.9 MB | 335 | ~34.0 | ~80.0+ | L1 direct name cache (4096 entries per thread), relaxed atomic slot updates on 64-bit CRC32 hash keys, 10.9MB total memory |
 
 ## Evidence correction and exact-name candidate — 2026-11-02
 

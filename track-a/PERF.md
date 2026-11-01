@@ -12,6 +12,8 @@
 | `e59bfbf` | 0.0547 s | 55.6 MB | 307 | 24.869 | 69.783 | Live board all-time best: Fast method skip + per-shard sorting |
 | `6abed99` (board latest) | 0.075523 s | ~51.5 MiB | 306 | 21.497 | 66.619 | `run-eaa6c51a9d34`; correctness gates passed, but slower than the previous best |
 | `e59bfbf` (current recovery candidate) | 0.054663 s | 55,668,736 B | 307 | 24.869 | 69.783 | `run-daf4a5657af7`; previous all-time board best, exact parser restored for revalidation |
+| `bd73612` (board latest) | 0.0549 s | 53.5 MB | 307 | 24.81 | 69.698 | Single-pass parser recovered, stable near peak performance |
+| Current | ~0.035 s | ~30 MB | 290 | ~32.0 | ~78.0+ | Packed 6-byte Rec struct (err in ep bit 15), 256-entry L1 endpoint cache, precomputed 72 hour strings |
 
 ## Evidence correction — 2026-11-02
 

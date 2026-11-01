@@ -128,8 +128,6 @@ int main(int ac, char** av) {
         if (r.ec == std::errc{} && r.ptr == s + strlen(s) && v >= 1 && v <= 12) W = v;
     }
 
-    // Parsing queries
-
     MF qf(std::string(dd) + "/queries.txt");
     const char* qp = qf.d, * qe = qp + qf.s;
     Dict dt;
@@ -179,8 +177,6 @@ int main(int ac, char** av) {
         }
     }
 
-
-
     size_t NT = dt.count;
     MF df(std::string(dd) + "/docs.txt");
     const char* dp = df.d, * de = dp + df.s;
@@ -208,6 +204,9 @@ int main(int ac, char** av) {
         auto& l_df = th_df[wid];
         std::vector<uint32_t> last_doc(NT, ~0u);
         char tok_buf[32];
+        struct L1F { uint64_t hash = 0; uint32_t tid = ~0u; };
+        std::vector<L1F> l1(8192);
+
         while (sc < end) {
             uint32_t id = 0;
             while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
@@ -229,7 +228,14 @@ int main(int ac, char** av) {
                 if (tl <= 32) {
                     for (size_t i = 0; i < tl; ++i) tok_buf[i] = CHAR_MAP[(uint8_t)tok_st[i]];
                     uint64_t h64 = fast_hash(tok_buf, tl);
-                    uint32_t tid = dt.fn_fast(h64);
+                    uint32_t lidx = uint32_t(h64) & 8191;
+                    uint32_t tid;
+                    if (l1[lidx].hash == h64) {
+                        tid = l1[lidx].tid;
+                    } else {
+                        tid = dt.fn_fast(h64);
+                        l1[lidx] = {h64, tid};
+                    }
                     if (tid != ~0u && last_doc[tid] != id) {
                         last_doc[tid] = id;
                         l_df[tid]++;
@@ -281,6 +287,9 @@ int main(int ac, char** av) {
         auto& l_off = th_off[wid];
         std::vector<uint32_t> last_doc(NT, ~0u);
         char tok_buf[32];
+        struct L1F { uint64_t hash = 0; uint32_t tid = ~0u; };
+        std::vector<L1F> l1(8192);
+
         while (sc < end) {
             uint32_t id = 0;
             while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
@@ -295,7 +304,14 @@ int main(int ac, char** av) {
                 if (tl <= 32) {
                     for (size_t i = 0; i < tl; ++i) tok_buf[i] = CHAR_MAP[(uint8_t)tok_st[i]];
                     uint64_t h64 = fast_hash(tok_buf, tl);
-                    uint32_t tid = dt.fn_fast(h64);
+                    uint32_t lidx = uint32_t(h64) & 8191;
+                    uint32_t tid;
+                    if (l1[lidx].hash == h64) {
+                        tid = l1[lidx].tid;
+                    } else {
+                        tid = dt.fn_fast(h64);
+                        l1[lidx] = {h64, tid};
+                    }
                     if (tid != ~0u && last_doc[tid] != id) {
                         last_doc[tid] = id;
                         uint32_t bs_id = bitset_map[tid];
@@ -311,8 +327,6 @@ int main(int ac, char** av) {
         }
     });
     std::vector<std::vector<uint32_t>>().swap(th_off);
-
-
 
     auto get_pos = [&](uint32_t t) -> std::pair<const uint32_t*, size_t> {
         return {all_postings.data() + pos_off[t], df_cnt[t]};
@@ -566,8 +580,6 @@ int main(int ac, char** av) {
         }
     });
 
-
-
     std::string out;
     out.reserve(NQ * 32);
     for (size_t q = 0; q < NQ; ++q) {
@@ -577,7 +589,5 @@ int main(int ac, char** av) {
     int ofd = open((std::string(od) + "/results.txt").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     [[maybe_unused]] auto wr = write(ofd, out.data(), out.size());
     close(ofd);
-
-
-    return 0;
+    _exit(0);
 }

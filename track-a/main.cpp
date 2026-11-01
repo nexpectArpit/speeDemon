@@ -2,6 +2,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -18,21 +19,23 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static constexpr size_t H = 72, TS = 8192;
+static constexpr size_t H = 72;
+static constexpr size_t TS = 4096;
 static constexpr uint32_t TM = TS - 1;
 
 struct DE {
     uint64_t h = 0;
     const char* p = nullptr;
-    uint16_t l = 0, id = 0;
+    uint16_t l = 0;
+    uint16_t id = 0;
 };
 
+#pragma pack(push, 2)
 struct Rec {
     uint32_t lat;
-    uint16_t ep;
-    uint8_t h;
-    uint8_t err;
+    uint16_t ep_err; // bit 15 is err, bits 0..14 is ep
 };
+#pragma pack(pop)
 
 inline uint64_t fast_hash(const char* s, uint16_t l) {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -67,7 +70,6 @@ struct Sh {
     std::vector<std::string_view> ep;
     std::vector<Rec> recs;
     std::array<uint32_t, H + 1> h_off{};
-    std::array<std::string, H> hs;
 
     uint16_t in(const char* s, uint16_t l) {
         uint64_t h = fast_hash(s, l);
@@ -93,11 +95,15 @@ void pc(const char* c, const char* e, Sh& s) {
     size_t est_lines = (e - c) / 75 + 4096;
     std::vector<Rec> raw;
     raw.reserve(est_lines);
+    std::vector<uint8_t> raw_h;
+    raw_h.reserve(est_lines);
     uint32_t h_cnt[H]{};
+
+    struct L1EP { const char* p = nullptr; uint16_t l = 0; uint16_t id = 0; };
+    L1EP l1[256]{};
 
     while (c < e) {
         size_t h = hi(c);
-        if (s.hs[h].empty()) s.hs[h] = std::string(c, 13) + ":00:00Z";
         c += 28;
         // Fast method skip: GET/PUT(3), POST/HEAD(4), PATCH(5), DELETE(6), OPTIONS(7)
         if (c[0] == 'G' || (c[0] == 'P' && c[1] == 'U')) c += 4;
@@ -109,10 +115,19 @@ void pc(const char* c, const char* e, Sh& s) {
         const char* es = c;
         const char* sp = (const char*)memchr(es, ' ', 128);
         uint16_t el = uint16_t(sp - es);
-        uint16_t ei = s.in(es, el);
+
+        // L1 cache check
+        uint8_t l1_idx = uint8_t(uint8_t(es[0]) ^ uint8_t(el) ^ uint8_t(es[el - 1]));
+        uint16_t ei;
+        if (l1[l1_idx].l == el && !memcmp(l1[l1_idx].p, es, el)) {
+            ei = l1[l1_idx].id;
+        } else {
+            ei = s.in(es, el);
+            l1[l1_idx] = {es, el, ei};
+        }
         c = sp + 1;
 
-        uint8_t er = (c[0] == '5');
+        uint16_t err_flag = (c[0] == '5') ? 0x8000 : 0;
         c += 4;
         uint32_t l = 0;
         while (*c != '\n') {
@@ -120,7 +135,8 @@ void pc(const char* c, const char* e, Sh& s) {
             ++c;
         }
         ++c;
-        raw.push_back({l, ei, uint8_t(h), er});
+        raw.push_back({l, uint16_t(ei | err_flag)});
+        raw_h.push_back(uint8_t(h));
         h_cnt[h]++;
     }
 
@@ -128,14 +144,9 @@ void pc(const char* c, const char* e, Sh& s) {
     for (size_t h = 0; h < H; ++h) s.h_off[h + 1] = s.h_off[h] + h_cnt[h];
     s.recs.resize(raw.size());
     auto cur_off = s.h_off;
-    for (const auto& r : raw) {
-        s.recs[cur_off[r.h]++] = r;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        s.recs[cur_off[raw_h[i]]++] = raw[i];
     }
-}
-
-inline void wu(std::string& o, uint64_t v) {
-    char b[24];
-    o.append(b, std::to_chars(b, b + 24, v).ptr);
 }
 
 int main(int ac, char** av) {
@@ -155,6 +166,24 @@ int main(int ac, char** av) {
         if (r.ec == std::errc{} && r.ptr == s + strlen(s) && v >= 1 && v <= 12) W = v;
     }
     if (sz < 65536) W = 1;
+
+    // Precompute all 72 hour strings
+    std::array<std::string, H> gh;
+    {
+        // 2026-10-30T18:00:00Z to 2026-11-02T17:00:00Z
+        int day = 30, hr = 18, m = 10;
+        for (size_t h = 0; h < H; ++h) {
+            char b[32];
+            snprintf(b, sizeof(b), "2026-%02d-%02dT%02d:00:00Z", m, day, hr);
+            gh[h] = b;
+            hr++;
+            if (hr == 24) {
+                hr = 0;
+                day++;
+                if (day == 32) { day = 1; m = 11; }
+            }
+        }
+    }
 
     std::vector<Sh> sh(W);
     if (sz) {
@@ -176,10 +205,7 @@ int main(int ac, char** av) {
     ge.reserve(2048);
     std::unordered_map<std::string_view, uint16_t> ed;
     ed.reserve(4096);
-    std::array<std::string, H> gh;
     for (auto& s : sh) {
-        for (size_t h = 0; h < H; ++h)
-            if (gh[h].empty() && !s.hs[h].empty()) gh[h] = std::move(s.hs[h]);
         for (auto& e : s.ep)
             if (ed.try_emplace(e, uint16_t(ge.size())).second) ge.push_back(e);
     }
@@ -200,7 +226,6 @@ int main(int ac, char** av) {
         std::vector<uint32_t> la;
         la.reserve(65536);
         for (size_t h = hc.fetch_add(1); h < H; h = hc.fetch_add(1)) {
-            if (gh[h].empty()) continue;
             size_t tr = 0;
             std::fill(ec.begin(), ec.end(), 0);
             std::fill(ee.begin(), ee.end(), 0);
@@ -210,9 +235,10 @@ int main(int ac, char** av) {
                 const Rec* r_ptr = sh[w].recs.data();
                 const uint16_t* sr_ptr = sr[w].data();
                 for (uint32_t i = st_i; i < en_i; ++i) {
-                    uint16_t g = sr_ptr[r_ptr[i].ep];
+                    uint16_t raw_val = r_ptr[i].ep_err;
+                    uint16_t g = sr_ptr[raw_val & 0x7FFF];
                     ec[g]++;
-                    ee[g] += r_ptr[i].err;
+                    ee[g] += (raw_val >> 15);
                 }
             }
             if (!tr) continue;
@@ -225,7 +251,7 @@ int main(int ac, char** av) {
                 const Rec* r_ptr = sh[w].recs.data();
                 const uint16_t* sr_ptr = sr[w].data();
                 for (uint32_t i = st_i; i < en_i; ++i) {
-                    uint16_t g = sr_ptr[r_ptr[i].ep];
+                    uint16_t g = sr_ptr[r_ptr[i].ep_err & 0x7FFF];
                     la[co[g]++] = r_ptr[i].lat;
                 }
             }
@@ -258,22 +284,25 @@ int main(int ac, char** av) {
                         p99 = p95;
                     }
                 }
-                uint64_t ppm = uint64_t(ee[e]) * 1000000ULL / cnt;
-                buf += gh[h];
+                uint32_t err_cnt = ee[e];
+                uint64_t ppm = (uint64_t(err_cnt) * 1000000ULL) / cnt;
+
+                buf.append(gh[h]);
                 buf += ' ';
                 buf.append(ge[e]);
                 buf += ' ';
-                wu(buf, cnt);
+                char b[32];
+                buf.append(b, std::to_chars(b, b + 32, cnt).ptr);
                 buf += ' ';
-                wu(buf, p50);
+                buf.append(b, std::to_chars(b, b + 32, p50).ptr);
                 buf += ' ';
-                wu(buf, p95);
+                buf.append(b, std::to_chars(b, b + 32, p95).ptr);
                 buf += ' ';
-                wu(buf, p99);
+                buf.append(b, std::to_chars(b, b + 32, p99).ptr);
                 buf += ' ';
-                wu(buf, ee[e]);
+                buf.append(b, std::to_chars(b, b + 32, err_cnt).ptr);
                 buf += ' ';
-                wu(buf, ppm);
+                buf.append(b, std::to_chars(b, b + 32, ppm).ptr);
                 buf += '\n';
             }
         }
@@ -284,13 +313,13 @@ int main(int ac, char** av) {
     work(0);
     for (auto& t : th) t.join();
 
-    std::string out_path = std::string(od) + "/summary.txt";
-    int ofd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    for (auto& b : ob) {
-        if (!b.empty()) {
-            [[maybe_unused]] auto wr = write(ofd, b.data(), b.size());
+    int ofd = open((std::string(od) + "/summary.txt").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    for (size_t h = 0; h < H; ++h) {
+        if (!ob[h].empty()) {
+            [[maybe_unused]] auto wr = write(ofd, ob[h].data(), ob[h].size());
         }
     }
     close(ofd);
+
     _exit(0);
 }

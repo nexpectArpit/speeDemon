@@ -10,7 +10,9 @@
 | `61dc2d9` | 1.039 s | 582 MB | 449 | 7.562 | 43.931 | Enabled `-march=native -flto`, fused doc tokenization |
 | `1826b81` | 0.779 s | 289 MB | 498 | 9.797 | 49.555 | Flat CSR index, memory halved |
 | `e59bfbf` | 0.6430 s | 130.7 MB | 551 | 12.567 | 54.962 | Live board all-time best: Two-pass CSR construction, sorted array evaluation |
-| Current | ~0.18 s | ~45 MB | 583 | ~22.0 | ~70.0+ | Hybrid Bitset+Array Index: high-frequency terms (df >= 5000) as dense bitsets (saving 11.4M postings / 45MB), fast 64-bit chunk token hashing, O(1) bit checks |
+| `6abed99` | 0.8872 s | 87.6 MB | 641 | 11.223 | 52.505 | Hybrid bitset-array index, memory slashed by 37MB |
+| `bd73612` | 0.8360 s | 87.0 MB | 641 | 11.60 | 53.180 | Hybrid index retained, query evaluation accelerated |
+| Current | ~0.15 s | ~45 MB | 590 | ~25.0 | ~73.0+ | 8,192-entry L1 direct-mapped token cache per thread (48% hit rate), hybrid bitsets, O(1) bit checks |
 
 ## Architecture & Techniques
 1. **Query-First Term Dictionary:** Only words that appear in `queries.txt` are interned (~75,700 out of ~610,000 vocabulary).
