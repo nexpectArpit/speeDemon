@@ -30,6 +30,7 @@ struct DE {
 struct Rec {
     uint32_t lat;
     uint16_t ep;
+    uint8_t h;
     uint8_t err;
 };
 
@@ -89,26 +90,16 @@ inline size_t hi(const char* t) {
 }
 
 void pc(const char* c, const char* e, Sh& s) {
+    size_t est_lines = (e - c) / 75 + 4096;
+    std::vector<Rec> raw;
+    raw.reserve(est_lines);
     uint32_t h_cnt[H]{};
-    // Pass 1: Superfast line count per hour using newline memchr (1.8 ms)
-    const char* p = c;
-    while (p < e) {
-        size_t h = hi(p);
-        h_cnt[h]++;
-        const char* nl = (const char*)memchr(p, '\n', e - p);
-        p = nl ? nl + 1 : e;
-    }
 
-    s.h_off[0] = 0;
-    for (size_t h = 0; h < H; ++h) s.h_off[h + 1] = s.h_off[h] + h_cnt[h];
-    s.recs.resize(s.h_off[H]);
-    auto cur_off = s.h_off;
-
-    // Pass 2: Direct parse into exactly-sized s.recs (Zero intermediate vector! Zero reallocation!)
     while (c < e) {
         size_t h = hi(c);
         if (s.hs[h].empty()) s.hs[h] = std::string(c, 13) + ":00:00Z";
         c += 28;
+        // Fast method skip: GET/PUT(3), POST/HEAD(4), PATCH(5), DELETE(6), OPTIONS(7)
         if (c[0] == 'G' || (c[0] == 'P' && c[1] == 'U')) c += 4;
         else if (c[0] == 'H' || (c[0] == 'P' && c[1] == 'O')) c += 5;
         else if (c[0] == 'P') c += 6;
@@ -129,7 +120,16 @@ void pc(const char* c, const char* e, Sh& s) {
             ++c;
         }
         ++c;
-        s.recs[cur_off[h]++] = {l, ei, er};
+        raw.push_back({l, ei, uint8_t(h), er});
+        h_cnt[h]++;
+    }
+
+    s.h_off[0] = 0;
+    for (size_t h = 0; h < H; ++h) s.h_off[h + 1] = s.h_off[h] + h_cnt[h];
+    s.recs.resize(raw.size());
+    auto cur_off = s.h_off;
+    for (const auto& r : raw) {
+        s.recs[cur_off[r.h]++] = r;
     }
 }
 
