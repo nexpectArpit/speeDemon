@@ -79,6 +79,41 @@ struct HP {
     }
 };
 
+struct DS {
+    struct State { uint64_t f = INF, r = INF; uint32_t key = ~0u; };
+    std::vector<State> table;
+    std::vector<uint32_t> used;
+    DS() : table(1024) { used.reserve(512); }
+    uint32_t slot(uint32_t u) const { return (u * 2654435761u) & uint32_t(table.size() - 1); }
+    void grow() {
+        auto old = std::move(table);
+        table = std::vector<State>(old.size() * 2);
+        used.clear();
+        used.reserve(table.size() / 2);
+        for (const auto& state : old) if (state.key != ~0u) {
+            uint32_t x = slot(state.key);
+            while (table[x].key != ~0u) x = (x + 1) & uint32_t(table.size() - 1);
+            table[x] = state;
+            used.push_back(x);
+        }
+    }
+    State& get(uint32_t u) {
+        uint32_t x = slot(u);
+        while (table[x].key != ~0u && table[x].key != u)
+            x = (x + 1) & uint32_t(table.size() - 1);
+        if (table[x].key == ~0u) {
+            if ((used.size() + 1) * 2 > table.size()) { grow(); return get(u); }
+            table[x] = {INF, INF, u};
+            used.push_back(x);
+        }
+        return table[x];
+    }
+    void clear() {
+        for (uint32_t x : used) table[x].key = ~0u;
+        used.clear();
+    }
+};
+
 template<class F>
 void par(size_t W, F f) {
     if (W <= 1) { f(0); return; }
@@ -194,21 +229,17 @@ int main(int ac, char** av) {
 
     size_t QW = std::min<size_t>(W, 6);
     struct WS {
-        std::vector<uint64_t> fd, rd;
-        std::vector<uint32_t> vs;
+        DS distances;
         HP fh, rh;
-        WS(size_t N) : fd(N, INF), rd(N, INF) { vs.reserve(16384); }
     };
     std::vector<WS> ws;
     ws.reserve(QW);
-    for (size_t w = 0; w < QW; ++w) ws.emplace_back(n);
+    for (size_t w = 0; w < QW; ++w) ws.emplace_back();
     std::atomic<size_t> qi{0};
 
     par(QW, [&](size_t wid) {
         WS& st = ws[wid];
-        auto& fd = st.fd;
-        auto& rd = st.rd;
-        auto& vs = st.vs;
+        auto& distances = st.distances;
         auto& fh = st.fh;
         auto& rh = st.rh;
 
@@ -217,10 +248,8 @@ int main(int ac, char** av) {
             if (s == t) { ans[q] = 0; continue; }
             if (s >= n || t >= n || fo[s] == fo[s + 1] || ro[t] == ro[t + 1]) { ans[q] = -1; continue; }
 
-            fd[s] = 0;
-            rd[t] = 0;
-            vs.push_back(s);
-            vs.push_back(t);
+            distances.get(s).f = 0;
+            distances.get(t).r = 0;
             fh.ps(0, s);
             rh.ps(0, t);
             uint64_t mu = INF;
@@ -233,35 +262,34 @@ int main(int ac, char** av) {
 
                 if (go_fwd) {
                     auto [d, u] = fh.pp();
-                    if (d > fd[u] || d >= mu) continue;
+                    if (d > distances.get(u).f || d >= mu) continue;
                     for (uint32_t e = fo[u], en = fo[u + 1]; e < en; ++e) {
                         uint32_t v = fe[e].to;
                         uint64_t nd = d + fe[e].w;
-                        if (nd < fd[v]) {
-                            if (fd[v] == INF && rd[v] == INF) vs.push_back(v);
-                            fd[v] = nd;
+                        auto& state = distances.get(v);
+                        if (nd < state.f) {
+                            state.f = nd;
                             fh.ps(nd, v);
-                            if (rd[v] != INF && nd + rd[v] < mu) mu = nd + rd[v];
+                            if (state.r != INF && nd + state.r < mu) mu = nd + state.r;
                         }
                     }
                 } else {
                     auto [d, v] = rh.pp();
-                    if (d > rd[v] || d >= mu) continue;
+                    if (d > distances.get(v).r || d >= mu) continue;
                     for (uint32_t e = ro[v], en = ro[v + 1]; e < en; ++e) {
                         uint32_t u = re[e].to;
                         uint64_t nd = d + re[e].w;
-                        if (nd < rd[u]) {
-                            if (fd[u] == INF && rd[u] == INF) vs.push_back(u);
-                            rd[u] = nd;
+                        auto& state = distances.get(u);
+                        if (nd < state.r) {
+                            state.r = nd;
                             rh.ps(nd, u);
-                            if (fd[u] != INF && fd[u] + nd < mu) mu = fd[u] + nd;
+                            if (state.f != INF && state.f + nd < mu) mu = state.f + nd;
                         }
                     }
                 }
             }
             ans[q] = (mu == INF) ? -1 : int64_t(mu);
-            for (uint32_t nd : vs) { fd[nd] = INF; rd[nd] = INF; }
-            vs.clear();
+            distances.clear();
             fh.cl();
             rh.cl();
         }
