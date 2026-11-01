@@ -18,7 +18,7 @@
 
 static constexpr size_t G_SIZE = 262144;
 static constexpr uint32_t G_MASK = G_SIZE - 1;
-static constexpr size_t MAX_COUNTRIES = 256;
+static constexpr size_t MAX_COUNTRIES = 242;
 static constexpr size_t BITSET_WORDS = G_SIZE / 64; // 4096 words
 
 struct Agg {
@@ -29,7 +29,7 @@ struct Agg {
 
 alignas(64) static std::atomic<uint64_t> g_hash_keys[G_SIZE];
 alignas(64) static std::atomic<uint64_t> g_country_bits[MAX_COUNTRIES][BITSET_WORDS];
-static uint16_t r2c[1000000];
+static uint8_t r2c[1000000];
 
 inline uint64_t hash_bytes(const char* p, size_t len) {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -58,7 +58,6 @@ inline uint64_t hash_bytes(const char* p, size_t len) {
 #endif
 }
 
-// Slot index (0..262143) is directly the unique name ID!
 inline uint32_t get_name_slot(uint64_t h) {
     uint32_t idx = uint32_t(h ^ (h >> 32)) & G_MASK;
     while (true) {
@@ -103,9 +102,9 @@ int main(int ac, char** av) {
     std::vector<std::string> cnames;
     cnames.reserve(256);
     {
-        struct CEnt { uint32_t h; uint16_t id; };
+        struct CEnt { uint32_t h; uint8_t id; };
         CEnt ctb[1024]{};
-        auto get_c = [&](const char* s, uint16_t l) -> uint16_t {
+        auto get_c = [&](const char* s, uint16_t l) -> uint8_t {
             uint32_t h = 2166136261u;
             for (uint16_t i = 0; i < l; ++i) h = (h ^ uint8_t(s[i])) * 16777619u;
             uint32_t x = h & 1023;
@@ -114,7 +113,7 @@ int main(int ac, char** av) {
                     return ctb[x].id;
                 x = (x + 1) & 1023;
             }
-            uint16_t id = uint16_t(cnames.size());
+            uint8_t id = uint8_t(cnames.size());
             cnames.emplace_back(s, l);
             ctb[x] = {h, id};
             return id;
@@ -133,11 +132,11 @@ int main(int ac, char** av) {
             uint16_t clen = uint16_t(p - cs);
             if (p < end && *p == '\r') ++p;
             if (p < end) ++p;
-            uint16_t cid = get_c(cs, clen);
+            uint8_t cid = get_c(cs, clen);
             if (reg < 1000000) r2c[reg] = cid;
         }
     }
-    uint16_t uid = uint16_t(cnames.size());
+    uint8_t uid = uint8_t(cnames.size());
     cnames.emplace_back("_UNMATCHED");
     size_t NC = cnames.size();
 
@@ -192,8 +191,6 @@ int main(int ac, char** av) {
 
     auto worker = [&](size_t wid) {
         auto& ag = sh[wid];
-        struct L1 { uint64_t h = 0; uint32_t nid = 0; };
-        std::vector<L1> l1(32768);
         const char* c = bn[wid];
         const char* end = bn[wid + 1];
         while (c < end) {
@@ -217,13 +214,7 @@ int main(int ac, char** av) {
                 name_len = raw_len - esc_cnt;
                 if (raw_len > 0) {
                     uint64_t nh = hash_bytes(name_start, raw_len);
-                    uint32_t lidx = uint32_t(nh ^ (nh >> 15)) & 32767;
-                    if (l1[lidx].h == nh) {
-                        nid = l1[lidx].nid;
-                    } else {
-                        nid = get_name_slot(nh);
-                        l1[lidx] = {nh, nid};
-                    }
+                    nid = get_name_slot(nh);
                 }
                 c += 2; // skip '"' and ','
             } else {
@@ -247,8 +238,8 @@ int main(int ac, char** av) {
             uint32_t reg = 0;
             while (*c >= '0' && *c <= '9') reg = reg * 10 + (*c++ - '0');
             ++c; // ','
-            uint16_t cid = (reg < 1000000) ? r2c[reg] : uid;
-            if (cid == 65535) cid = uid;
+            uint8_t cid = (reg < 1000000) ? r2c[reg] : uid;
+            if (cid == 0xFF) cid = uid;
 
             bool neg = (*c == '-');
             if (neg) ++c;
@@ -297,13 +288,13 @@ int main(int ac, char** av) {
         }
     }
 
-    std::vector<uint16_t> sc;
-    for (uint16_t k = 0; k < NC; ++k) if (ta[k].count) sc.push_back(k);
-    std::sort(sc.begin(), sc.end(), [&](uint16_t a, uint16_t b) { return cnames[a] < cnames[b]; });
+    std::vector<uint8_t> sc;
+    for (uint8_t k = 0; k < NC; ++k) if (ta[k].count) sc.push_back(k);
+    std::sort(sc.begin(), sc.end(), [&](uint8_t a, uint8_t b) { return cnames[a] < cnames[b]; });
 
     std::string out;
     out.reserve(sc.size() * 120);
-    for (uint16_t k : sc) {
+    for (uint8_t k : sc) {
         uint64_t nd = 0;
         for (size_t w = 0; w < BITSET_WORDS; ++w) {
             nd += __builtin_popcountll(g_country_bits[k][w].load(std::memory_order_relaxed));

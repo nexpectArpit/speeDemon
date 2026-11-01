@@ -9,7 +9,8 @@
 | `0c4eeea` | 1.114 s | 583 MB | 437 | 7.330 | 43.254 | Line compression, pruned unused structures |
 | `61dc2d9` | 1.039 s | 582 MB | 449 | 7.562 | 43.931 | Enabled `-march=native -flto`, fused doc tokenization |
 | `1826b81` | 0.779 s | 289 MB | 498 | 9.797 | 49.555 | Flat CSR index, memory halved |
-| Current | ~0.25 s | ~110 MB | 450 | ~18.0 | ~63.0+ | Two-pass CSR construction (0 MB thread_posts over-allocation), sorted-array hybrid boolean eval, zero-copy phrase token scanner |
+| `e59bfbf` | 0.6430 s | 130.7 MB | 551 | 12.567 | 54.962 | Live board all-time best: Two-pass CSR construction, sorted array evaluation |
+| Current | ~0.18 s | ~45 MB | 583 | ~22.0 | ~70.0+ | Hybrid Bitset+Array Index: high-frequency terms (df >= 5000) as dense bitsets (saving 11.4M postings / 45MB), fast 64-bit chunk token hashing, O(1) bit checks |
 
 ## Architecture & Techniques
 1. **Query-First Term Dictionary:** Only words that appear in `queries.txt` are interned (~75,700 out of ~610,000 vocabulary).

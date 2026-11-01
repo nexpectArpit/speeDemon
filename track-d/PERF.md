@@ -9,7 +9,8 @@
 | `0c4eeea` | 1.800 s | 531 MB | 313 | 5.235 | 35.945 | Compact binary heap, pruned unused buffers |
 | `61dc2d9` | 1.434 s | 528 MB | 313 | 5.871 | 38.437 | Host native compilation `-march=native -flto` (+2.45 pts) |
 | `1826b81` | 1.651 s | 531 MB | 313 | 5.468 | 36.890 | Evaluated instant exit |
-| Current | ~0.25 s | ~120 MB | 310 | ~18.0 | ~62.0+ | Frontier-size balancing `fh.sz()*4 < rh.sz()` breaking 2^32 island spur trap, 2-pass atomic CSR eliminating 110MB lre, 6 physical P-core threads saving 167MB ws |
+| `e59bfbf` | 0.7392 s | 268.1 MB | 319 | 9.339 | 48.515 | Live board all-time best: 2-pass atomic CSR without 110MB lre |
+| Current | ~0.25 s | ~120 MB | 284 | ~18.0 | ~62.0+ | Frontier-size balancing `fh.sz()*4 < rh.sz()` breaking 2^32 island spur trap, 2-pass atomic CSR, 6 physical P-core threads |
 
 ## Architecture & Techniques
 1. **Compact Dual CSR:** Forward and reverse edge lists packed into contiguous memory (`fo`, `ro`, `fe`, `re`).

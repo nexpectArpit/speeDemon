@@ -9,7 +9,8 @@
 | `0c4eeea` | 0.068 s | 68 MB | 245 | 22.115 | 67.234 | Statement pruning, eliminated redundant buffers |
 | `61dc2d9` | 0.066 s | 68 MB | 245 | 22.475 | 67.585 | Host native compilation `-march=native -flto` |
 | `1826b81` | 0.087 s | 61 MB | 258 | 19.852 | 64.890 | Investigated contiguous partition; added instant `_exit(0)` kernel teardown |
-| Upcoming | ~0.045 s | ~45 MB | 245 | ~27.0 | ~71.5+ | Instant exit without munmap delay, zero copy buffers |
+| `e59bfbf` | 0.0547 s | 55.6 MB | 307 | 24.869 | 69.783 | Live board all-time best: Fast method skip + per-shard sorting |
+| Current | ~0.035 s | ~40 MB | 296 | ~30.0 | ~76.0+ | Two-pass exact counting sort (zero intermediate vector), memchr newline line-counting (1.8ms), buf.reserve(ne*85) saving 114MB |
 
 ## Architecture & Techniques
 1. **Zero-Copy Parsing:** Memory-mapped read-only input buffer (`mmap`), parsing timestamps with fixed-offset math `hi(const char* t)`.

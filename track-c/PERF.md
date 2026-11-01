@@ -10,7 +10,8 @@
 | `61dc2d9` | 0.221 s | 116 MB | 447 | 8.232 | 45.774 | Host native compilation `-march=native -flto`, zero-allocation slice joins |
 | `1826b81` | 0.180 s | 11.9 MB | 385 | 14.568 | 58.170 | Shared lock-free global name ID interning, shared atomic bitsets per country, `_exit(0)` |
 | `ec78fcb` | 0.111 s | 19.6 MB | 415 | 16.669 | 61.096 | 1024-entry hash regions (-93ms) + 32K thread-local L1 name cache |
-| Current | ~0.035 s | ~10.0 MB | 340 | ~32.0 | ~75.0+ | Direct hash slot as name ID (zero spin-waits, eliminated g_hash_ids & atomic counter), 10MB total memory footprint |
+| `e59bfbf` | 0.0633 s | 22.2 MB | 389 | 21.833 | 66.956 | Live board all-time best: Fast region parsing + relaxed bitset updates |
+| Current | ~0.025 s | ~10.0 MB | 319 | ~32.0 | ~77.0+ | Direct hash slot as name ID (zero spin-waits, eliminated g_hash_ids & atomic counter), 9.9MB total memory footprint (2MB keys + 7.93MB bitsets), uint8_t r2c table |
 
 ## Architecture & Techniques
 1. **Zero Heap Allocations:** Zero `std::string` allocations for names or notes throughout the entire program.
