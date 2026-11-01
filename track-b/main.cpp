@@ -34,12 +34,21 @@ MF qf(std::string(dd)+"/queries.txt");const char*qp=qf.d,*qe=qp+qf.s;Dict dt;std
 while(qp<qe){while(qp<qe&&(*qp=='\n'||*qp=='\r'))++qp;if(qp>=qe)break;const char*ls=qp;while(qp<qe&&*qp!='\n')++qp;std::string_view l(ls,qp-ls);if(qp<qe)++qp;
 if(l.starts_with("BOOL ")){QItem q;size_t p=5;bool eo=0;while(p<l.size()){size_t sp=l.find(' ',p);if(sp==std::string_view::npos)sp=l.size();std::string_view w=l.substr(p,sp-p);if(eo){q.op.push_back(w=="AND"?Op::AND:w=="OR"?Op::OR:Op::NOT);eo=0;}else{q.t.push_back(dt.in(w));eo=1;}p=sp+1;}qs.push_back(std::move(q));}
 else if(l.starts_with("PHRASE \"")){QItem q;q.ph=1;size_t p=8,qe_=l.rfind('"');if(qe_==std::string_view::npos)qe_=l.size();while(p<qe_){size_t sp=l.find(' ',p);if(sp==std::string_view::npos||sp>qe_)sp=qe_;std::string_view w=l.substr(p,sp-p);q.t.push_back(dt.in(w));q.rw.emplace_back(w);p=sp+1;}qs.push_back(std::move(q));}}
-size_t NT=dt.tm.size();MF df(std::string(dd)+"/docs.txt");const char*dp=df.d,*de=dp+df.s;std::vector<DocRef>dr;dr.reserve(260000);
-const char*p=dp;while(p<de){while(p<de&&*p!='\t')++p;if(p>=de)break;++p;const char*ts=p;while(p<de&&*p!='\n')++p;dr.push_back({ts,uint32_t(p-ts)});if(p<de)++p;}
-size_t ND=dr.size(),NW=(ND+63)/64;std::vector<std::vector<std::vector<uint32_t>>>wp(W);for(auto&v:wp)v.resize(NT);
-par(W,[&](size_t wid){size_t s=ND*wid/W,e=ND*(wid+1)/W;std::vector<uint32_t>lt;lt.reserve(256);char tb[64];
-for(size_t id=s;id<e;++id){lt.clear();const char*tp=dr[id].p,*te=tp+dr[id].l;while(tp<te){while(tp<te&&!tc(*tp))++tp;if(tp>=te)break;size_t tl=0;while(tp<te&&tc(*tp)){if(tl<63)tb[tl++]=tc(*tp);++tp;}uint32_t tid=dt.fn(tb,tl);if(tid!=~0u)lt.push_back(tid);}
-std::sort(lt.begin(),lt.end());lt.erase(std::unique(lt.begin(),lt.end()),lt.end());for(uint32_t tid:lt)wp[wid][tid].push_back(uint32_t(id));}});
+size_t NT=dt.tm.size();MF df(std::string(dd)+"/docs.txt");const char*dp=df.d,*de=dp+df.s;
+const char*last=de;while(last>dp&&*(last-1)=='\n')--last;while(last>dp&&*(last-1)!='\n')--last;
+uint32_t ND=0;while(last<de&&*last>='0'&&*last<='9')ND=ND*10+(*last++-'0');ND++;
+size_t NW=(ND+63)/64;std::vector<DocRef>dr(ND);
+std::vector<const char*>bn(W+1,de);bn[0]=dp;
+for(size_t i=1;i<W;++i){const char*p=dp+df.s*i/W;while(p<de&&*(p-1)!='\n')++p;bn[i]=p;}
+std::vector<std::vector<std::vector<uint32_t>>>wp(W);for(auto&v:wp)v.resize(NT);
+par(W,[&](size_t wid){const char*sc=bn[wid],*end=bn[wid+1];std::vector<uint32_t>lt;lt.reserve(256);char tb[64];
+while(sc<end){uint32_t id=0;while(sc<end&&*sc>='0'&&*sc<='9')id=id*10+(*sc++-'0');
+if(sc<end&&*sc=='\t')++sc;const char*ts=sc;while(sc<end&&*sc!='\n')++sc;
+uint32_t len=uint32_t(sc-ts);if(sc<end)++sc;dr[id]={ts,len};
+lt.clear();const char*tp=ts,*te=ts+len;
+while(tp<te){while(tp<te&&!tc(*tp))++tp;if(tp>=te)break;size_t tl=0;while(tp<te&&tc(*tp)){if(tl<63)tb[tl++]=tc(*tp);++tp;}
+uint32_t tid=dt.fn(tb,tl);if(tid!=~0u)lt.push_back(tid);}
+std::sort(lt.begin(),lt.end());lt.erase(std::unique(lt.begin(),lt.end()),lt.end());for(uint32_t tid:lt)wp[wid][tid].push_back(id);}});
 std::vector<std::vector<uint32_t>>pos(NT);for(size_t t=0;t<NT;++t){size_t sz=0;for(size_t w=0;w<W;++w)sz+=wp[w][t].size();pos[t].reserve(sz);for(size_t w=0;w<W;++w)pos[t].insert(pos[t].end(),wp[w][t].begin(),wp[w][t].end());}
 std::vector<std::vector<uint64_t>>bs(NT);for(size_t t=0;t<NT;++t)if(pos[t].size()>=256){bs[t].assign(NW,0);for(uint32_t id:pos[t])bs[t][id>>6]|=(1ULL<<(id&63));}
 size_t NQ=qs.size();std::vector<std::string>res(NQ);std::atomic<size_t>qc{0};
@@ -55,8 +64,9 @@ uint32_t cnt=0,f10[10],n10=0;uint64_t isum=0;
 for(size_t w=0;w<NW;++w){uint64_t m=cb[w];if(!m)continue;cnt+=__builtin_popcountll(m);size_t base=w<<6;while(m){int bit=__builtin_ctzll(m);uint32_t d=uint32_t(base+bit);isum+=d;if(n10<10)f10[n10++]=d;m&=(m-1);}}
 rs.append(b,std::to_chars(b,b+32,cnt).ptr);rs+=' ';rs.append(b,std::to_chars(b,b+32,isum).ptr);for(uint32_t i=0;i<n10;++i){rs+=' ';rs.append(b,std::to_chars(b,b+32,f10[i]).ptr);}}
 else{const auto&ts=it.t;const auto&rw=it.rw;size_t K=ts.size();bool emp=0;for(uint32_t ti:ts)if(ti==~0u||pos[ti].empty()){emp=1;break;}
-if(emp){rs="0 0";continue;}size_t mi=0,msz=pos[ts[0]].size();for(size_t i=1;i<K;++i)if(pos[ts[i]].size()<msz){msz=pos[ts[i]].size();mi=i;}
-pc=pos[ts[mi]];for(size_t i=0;i<K;++i){if(i==mi)continue;uint32_t ti=ts[i];if(!bs[ti].empty()){const auto&b_=bs[ti];size_t o=0;for(uint32_t d:pc)if(b_[d>>6]&(1ULL<<(d&63)))pc[o++]=d;pc.resize(o);}
+if(emp){rs="0 0";continue;}std::array<size_t,16>ord;for(size_t i=0;i<K;++i)ord[i]=i;
+std::sort(ord.begin(),ord.begin()+K,[&](size_t a,size_t b){return pos[ts[a]].size()<pos[ts[b]].size();});
+pc=pos[ts[ord[0]]];for(size_t idx=1;idx<K;++idx){uint32_t ti=ts[ord[idx]];if(!bs[ti].empty()){const auto&b_=bs[ti];size_t o=0;for(uint32_t d:pc)if(b_[d>>6]&(1ULL<<(d&63)))pc[o++]=d;pc.resize(o);}
 else{const auto&pl=pos[ti];size_t o=0;for(uint32_t d:pc)if(std::binary_search(pl.begin(),pl.end(),d))pc[o++]=d;pc.resize(o);}if(pc.empty())break;}
 uint32_t cnt=0,f10[10],n10=0;uint64_t isum=0;
 for(uint32_t d:pc){const char*tp=dr[d].p,*te=tp+dr[d].l;dtk.clear();while(tp<te){while(tp<te&&!tc(*tp))++tp;if(tp>=te)break;const char*st=tp;while(tp<te&&tc(*tp))++tp;dtk.push_back({st,uint16_t(tp-st)});}
