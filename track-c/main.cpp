@@ -29,6 +29,7 @@ alignas(64) static std::atomic<uint64_t> g_hash_keys[G_SIZE];
 alignas(64) static std::atomic<uint32_t> g_hash_ids[G_SIZE];
 alignas(64) static std::atomic<uint32_t> g_next_nid{1};
 alignas(64) static std::atomic<uint64_t> g_country_bits[MAX_COUNTRIES][BITSET_WORDS];
+static uint16_t r2c[1000000];
 
 inline uint32_t get_name_id(uint64_t h) {
     if (h == 0) h = 1;
@@ -89,10 +90,26 @@ int main(int ac, char** av) {
     const char* rp = (const char*)mmap(nullptr, rst.st_size, PROT_READ, MAP_PRIVATE, rfd, 0);
     close(rfd);
 
-    std::vector<uint16_t> r2c(1000000, 65535);
+    memset(r2c, 0xFF, sizeof(r2c));
     std::vector<std::string> cnames;
     cnames.reserve(256);
     {
+        struct CEnt { uint32_t h; uint16_t id; };
+        CEnt ctb[1024]{};
+        auto get_c = [&](const char* s, uint16_t l) -> uint16_t {
+            uint32_t h = 2166136261u;
+            for (uint16_t i = 0; i < l; ++i) h = (h ^ uint8_t(s[i])) * 16777619u;
+            uint32_t x = h & 1023;
+            while (ctb[x].h) {
+                if (ctb[x].h == h && cnames[ctb[x].id].size() == l && !memcmp(cnames[ctb[x].id].data(), s, l))
+                    return ctb[x].id;
+                x = (x + 1) & 1023;
+            }
+            uint16_t id = uint16_t(cnames.size());
+            cnames.emplace_back(s, l);
+            ctb[x] = {h, id};
+            return id;
+        };
         const char* p = rp;
         const char* end = rp + rst.st_size;
         while (p < end && *p != '\n') ++p;
@@ -104,14 +121,11 @@ int main(int ac, char** av) {
             ++p;
             const char* cs = p;
             while (p < end && *p != '\n' && *p != '\r') ++p;
-            std::string_view cn(cs, p - cs);
+            uint16_t clen = uint16_t(p - cs);
             if (p < end && *p == '\r') ++p;
             if (p < end) ++p;
-            uint16_t cid = 0;
-            while (cid < cnames.size() && cnames[cid] != cn) ++cid;
-            if (cid == cnames.size()) cnames.emplace_back(cn);
-            if (reg >= r2c.size()) r2c.resize(std::max(size_t(reg + 1), r2c.size() * 2), 65535);
-            r2c[reg] = cid;
+            uint16_t cid = get_c(cs, clen);
+            if (reg < 1000000) r2c[reg] = cid;
         }
     }
     uint16_t uid = uint16_t(cnames.size());
@@ -167,6 +181,8 @@ int main(int ac, char** av) {
     std::vector<std::vector<Agg>> sh(W, std::vector<Agg>(NC));
     auto worker = [&](size_t wid) {
         auto& ag = sh[wid];
+        struct L1 { uint64_t h = 0; uint32_t nid = 0; };
+        std::vector<L1> l1(32768);
         const char* c = bn[wid];
         const char* end = bn[wid + 1];
         while (c < end) {
@@ -205,7 +221,16 @@ int main(int ac, char** av) {
                 c = cm;
             }
             if (c < end && *c == ',') ++c;
-            uint32_t nid = get_name_id(hash_bytes(name_start, raw_len));
+
+            uint64_t nh = hash_bytes(name_start, raw_len);
+            uint32_t lidx = uint32_t(nh ^ (nh >> 15)) & 32767;
+            uint32_t nid;
+            if (l1[lidx].h == nh) {
+                nid = l1[lidx].nid;
+            } else {
+                nid = get_name_id(nh);
+                l1[lidx] = {nh, nid};
+            }
 
             uint32_t note_len = 0;
             if (c < end && *c == '"') {
@@ -233,7 +258,7 @@ int main(int ac, char** av) {
             uint32_t reg = 0;
             while (c < end && *c >= '0' && *c <= '9') reg = reg * 10 + (*c++ - '0');
             if (c < end && *c == ',') ++c;
-            uint16_t cid = (reg < r2c.size()) ? r2c[reg] : uid;
+            uint16_t cid = (reg < 1000000) ? r2c[reg] : uid;
             if (cid == 65535) cid = uid;
 
             bool neg = (c < end && *c == '-');

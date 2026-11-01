@@ -8,7 +8,8 @@
 | `449923b` | 0.070 s | 72 MB | 332 | 20.589 | 65.682 | First C++20 release (mmap, L1 FNV-1a interning, two-pass counting sort) |
 | `0c4eeea` | 0.068 s | 68 MB | 245 | 22.115 | 67.234 | Statement pruning, eliminated redundant buffers |
 | `61dc2d9` | 0.066 s | 68 MB | 245 | 22.475 | 67.585 | Host native compilation `-march=native -flto` |
-| Upcoming | ~0.035 s | ~25 MB | 228 | ~35.0 | ~77.0+ | Flat contiguous bucket sorting per thread, zero vector reallocations, instant `_exit(0)` |
+| `1826b81` | 0.087 s | 61 MB | 258 | 19.852 | 64.890 | Investigated contiguous partition; added instant `_exit(0)` kernel teardown |
+| Upcoming | ~0.045 s | ~45 MB | 245 | ~27.0 | ~71.5+ | Instant exit without munmap delay, zero copy buffers |
 
 ## Architecture & Techniques
 1. **Zero-Copy Parsing:** Memory-mapped read-only input buffer (`mmap`), parsing timestamps with fixed-offset math `hi(const char* t)`.
