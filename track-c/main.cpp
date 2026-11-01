@@ -27,28 +27,26 @@ struct Agg {
     uint64_t name_bytes = 0, note_bytes = 0;
 };
 
-alignas(64) static std::atomic<uint64_t> g_hash_keys[G_SIZE];
+alignas(64) static std::atomic<const char*> g_names[G_SIZE];
+static size_t g_name_lengths[G_SIZE];
+static char g_pending;
 alignas(64) static std::atomic<uint64_t> g_country_bits[MAX_COUNTRIES][BITSET_WORDS];
 static uint8_t r2c[1000000];
 
 inline uint64_t hash_bytes(const char* p, size_t len) {
 #if defined(__x86_64__) || defined(_M_X64)
-    uint64_t h1 = len ^ 0x9e3779b97f4a7c15ULL;
-    uint64_t h2 = len * 0xbf58476d1ce4e5b9ULL;
+    uint64_t h = len;
     size_t i = 0;
     for (; i + 8 <= len; i += 8) {
         uint64_t v;
         memcpy(&v, p + i, 8);
-        h1 = _mm_crc32_u64(h1, v);
-        h2 = (h2 ^ v) * 0x94d049bb133111ebULL;
+        h = _mm_crc32_u64(h, v);
     }
     for (; i < len; ++i) {
         uint8_t c = uint8_t(p[i]);
-        h1 = _mm_crc32_u8(uint32_t(h1), c);
-        h2 = (h2 ^ c) * 0x94d049bb133111ebULL;
+        h = _mm_crc32_u8(uint32_t(h), c);
     }
-    uint64_t res = (h1 << 32) ^ h2 ^ (len << 48);
-    return res ? res : 1ULL;
+    return h;
 #else
     uint64_t h = 14695981039346656037ULL;
     for (size_t i = 0; i < len; ++i) {
@@ -58,17 +56,20 @@ inline uint64_t hash_bytes(const char* p, size_t len) {
 #endif
 }
 
-inline uint32_t get_name_slot(uint64_t h) {
+inline uint32_t get_name_slot(uint64_t h, const char* name, size_t length) {
     uint32_t idx = uint32_t(h ^ (h >> 32)) & G_MASK;
     while (true) {
-        uint64_t cur = g_hash_keys[idx].load(std::memory_order_relaxed);
-        if (cur == h) return idx;
-        if (cur == 0) {
-            uint64_t expected = 0;
-            if (g_hash_keys[idx].compare_exchange_strong(expected, h, std::memory_order_relaxed)) {
+        const char* cur = g_names[idx].load(std::memory_order_acquire);
+        if (cur == &g_pending) continue;
+        if (cur && g_name_lengths[idx] == length && !memcmp(cur, name, length)) return idx;
+        if (!cur) {
+            const char* expected = nullptr;
+            if (g_names[idx].compare_exchange_strong(expected, &g_pending, std::memory_order_relaxed)) {
+                g_name_lengths[idx] = length;
+                g_names[idx].store(name, std::memory_order_release);
                 return idx;
             }
-            if (expected == h) return idx;
+            continue;
         }
         idx = (idx + 1) & G_MASK;
     }
@@ -186,7 +187,7 @@ int main(int ac, char** av) {
     }
     for (size_t i = 1; i < W; ++i) if (bn[i] < bn[i - 1]) bn[i] = bn[i - 1];
 
-    uint32_t empty_slot = get_name_slot(hash_bytes("", 0));
+    uint32_t empty_slot = get_name_slot(hash_bytes("", 0), "", 0);
     std::vector<std::vector<Agg>> sh(W, std::vector<Agg>(NC));
 
     auto worker = [&](size_t wid) {
@@ -214,7 +215,7 @@ int main(int ac, char** av) {
                 name_len = raw_len - esc_cnt;
                 if (raw_len > 0) {
                     uint64_t nh = hash_bytes(name_start, raw_len);
-                    nid = get_name_slot(nh);
+                    nid = get_name_slot(nh, name_start, raw_len);
                 }
                 c += 2; // skip '"' and ','
             } else {

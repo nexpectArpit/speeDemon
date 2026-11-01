@@ -11,13 +11,21 @@
 | `1826b81` | 0.180 s | 11.9 MB | 385 | 14.568 | 58.170 | Shared lock-free global name ID interning, shared atomic bitsets per country, `_exit(0)` |
 | `ec78fcb` | 0.111 s | 19.6 MB | 415 | 16.669 | 61.096 | 1024-entry hash regions (-93ms) + 32K thread-local L1 name cache |
 | `e59bfbf` | 0.0633 s | 22.2 MB | 389 | 21.833 | 66.956 | Live board all-time best: Fast region parsing + relaxed bitset updates |
-| Current | ~0.025 s | ~10.0 MB | 319 | ~32.0 | ~77.0+ | Direct hash slot as name ID (zero spin-waits, eliminated g_hash_ids & atomic counter), 9.9MB total memory footprint (2MB keys + 7.93MB bitsets), uint8_t r2c table |
+| `6abed99` | 0.058297 s | ~14.5 MB | 378 | — | 69.821 | Historical public-board run `run-f0219ec17bd4`; not a measurement of the exact-name candidate |
+
+## Evidence correction and exact-name candidate — 2026-11-02
+
+The previous `Current ~0.025 s / ~10 MB / 319 lines / ~77 points` row was an unmeasured projection and is withdrawn. The old prose about a 32K local name cache and `g_hash_ids` did not describe `6abed99`. Neither the former lock-contention claims nor isolated setup-time savings are established by the retained current-source evidence.
+
+The current candidate resolves names by exact length and raw CSV name bytes, rather than assuming equal hashes imply equal names. This is valid within the generator contract: every nonempty name is quoted with one canonical doubled-quote encoding, and both empty forms share a slot. Slot reservation uses a pending marker; a release store publishes the mapped name pointer after its length, and readers acquire it before comparison. No per-name heap allocation is required. The x86 hash uses CRC instructions as a bucket selector; hash collisions are resolved by byte comparison.
+
+The exact-key length array adds 2 MiB of static virtual storage relative to the hash-only table. This is a correctness tradeoff, not a measured memory improvement. Five pairs of arm64 Docker runs all matched the public full output hash under the published runtime restrictions, but both versions exceeded timing spread tolerance, so no accepted runtime or score gain is claimed. Fresh scoring-box T/M/S/D and points remain pending a user-authorized push.
+
+A fresh reviewer independently passed 60 exact-output executions in sanitizer and optimized builds, deliberate equal-hash identity tests, and 300 rounds of concurrent publication. An amd64 image also produced the exact full-public SHA under Docker Desktop emulation with uid 65534, network disabled and read-only root/input. That validates the changed x86 CRC path's output, not scoring-box performance. Test reports and raw artifacts are retained under workspace `AUDIT/track-c/run-20261102/`.
 
 ## Architecture & Techniques
-1. **Zero Heap Allocations:** Zero `std::string` allocations for names or notes throughout the entire program.
-2. **Fast 1024-Entry Direct Region Hash Table:** Replaced the linear `cnames` string scan with a power-of-two hash table, dropping region lookup setup time from 107 ms to 13 ms.
-3. **Thread-Local 32K L1 Name Cache:** Each worker thread keeps a private direct-mapped L1 cache (32,768 entries, 512 KB), resolving ~50% of name accesses locally without hitting the shared atomic bus.
-4. **Shared Lock-Free Global Interning:** A single 262,144-entry lock-free hash table (`g_hash_keys` and `g_hash_ids`, 3 MB) handles global name ID resolution.
-5. **Atomic Country Bitsets:** Each country maintains an atomic 2048-word bitset (`g_country_bits`, 4 MB total) tracking distinct name IDs directly during the initial scan, completely eliminating the post-processing name deduplication and merge phase.
-6. **AVX2 `memchr` Quote Scanning:** Field scanning leverages vector instructions to jump 32 bytes per instruction across text fields.
-7. **Instant Kernel Exit (`_exit(0)`):** Bypasses glibc unmapping of 200 MB memory mapped pages and destructor overhead.
+1. **Mapped CSV fields:** Names and notes are scanned in the input mapping; name keys retain pointers and lengths without allocating decoded strings. Decoded lengths account for doubled quotes.
+2. **Region lookup:** Country codes are interned with exact comparison, and a direct region-to-country array handles known IDs and holes.
+3. **Exact shared name interning:** A 262,144-slot atomic pointer table with published lengths resolves hash collisions through exact byte comparison.
+4. **Country membership:** Each country has 4,096 atomic words tracking occupied name slots. Per-worker integer aggregates are merged after joining threads.
+5. **Process exit:** Output is closed before `_exit(0)`. Its isolated performance effect has not been measured.
