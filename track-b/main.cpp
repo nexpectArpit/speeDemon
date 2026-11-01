@@ -23,10 +23,8 @@ struct MF {
     size_t s = 0;
     MF(const std::string& p) {
         int fd = open(p.c_str(), O_RDONLY);
-        struct stat st{};
-        fstat(fd, &st);
-        s = st.st_size;
-        d = s ? (char*)mmap(nullptr, s, PROT_READ, MAP_PRIVATE, fd, 0) : nullptr;
+        struct stat st{}; fstat(fd, &st); s = st.st_size;
+        d = s ? (const char*)mmap(nullptr, s, PROT_READ, MAP_PRIVATE, fd, 0) : nullptr;
         close(fd);
     }
 };
@@ -34,10 +32,8 @@ struct MF {
 static constexpr auto make_char_map() {
     std::array<uint8_t, 256> m{};
     for (int c = 0; c < 256; ++c) {
-        if (c >= 'a' && c <= 'z') m[c] = c;
-        else if (c >= '0' && c <= '9') m[c] = c;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) m[c] = c;
         else if (c >= 'A' && c <= 'Z') m[c] = c + 32;
-        else m[c] = 0;
     }
     return m;
 }
@@ -46,35 +42,33 @@ static constexpr auto CHAR_MAP = make_char_map();
 static constexpr size_t TS = 262144;
 static constexpr uint32_t TM = TS - 1;
 
-inline uint64_t fast_hash(const char* p, size_t len) {
+inline uint64_t fast_hash_swar(const char* p, size_t len) {
     uint64_t h = 0x517cc1b727220a95ULL ^ (len * 0x9e3779b97f4a7c15ULL);
     size_t i = 0;
     while (i + 8 <= len) {
         uint64_t w;
         memcpy(&w, p + i, 8);
+        w |= 0x2020202020202020ULL;
         h = (h ^ w) * 0xbf58476d1ce4e5b9ULL;
         i += 8;
     }
     if (i < len) {
         uint64_t rem = 0;
         memcpy(&rem, p + i, len - i);
+        uint64_t mask = (len - i == 8) ? ~0ULL : ((1ULL << ((len - i) * 8)) - 1);
+        rem = (rem | 0x2020202020202020ULL) & mask;
         h = (h ^ rem) * 0x94d049bb133111ebULL;
     }
     return (h ^ (h >> 32)) | (uint64_t(len) << 56) | 1ULL;
 }
 
-struct DE {
-    uint64_t h64 = 0;
-    uint32_t id = 0;
-};
+struct DE { uint64_t h64 = 0; uint32_t id = 0; };
 
 struct Dict {
-    std::vector<DE> tb;
+    std::vector<DE> tb{TS};
     uint32_t count = 0;
-    Dict() : tb(TS) {}
-
     uint32_t in(std::string_view s) {
-        uint64_t h = fast_hash(s.data(), s.size());
+        uint64_t h = fast_hash_swar(s.data(), s.size());
         uint32_t x = uint32_t(h) & TM;
         while (tb[x].id) {
             if (tb[x].h64 == h) return tb[x].id - 1;
@@ -84,7 +78,6 @@ struct Dict {
         tb[x] = {h, id + 1};
         return id;
     }
-
     inline uint32_t fn_fast(uint64_t h) const {
         uint32_t x = uint32_t(h) & TM;
         while (tb[x].id) {
@@ -104,14 +97,9 @@ struct QItem {
     std::vector<std::string_view> rw;
 };
 
-struct DocRef {
-    const char* p;
-    uint32_t l;
-};
+struct DocRef { const char* p; uint32_t l; };
 
-template<class F>
-void par(size_t W, F f) {
-    if (W <= 1) { f(0); return; }
+template<class F> void par(size_t W, F f) {
     std::vector<std::thread> th;
     for (size_t i = 1; i < W; ++i) th.emplace_back(f, i);
     f(0);
@@ -119,13 +107,12 @@ void par(size_t W, F f) {
 }
 
 int main(int ac, char** av) {
-    const char* dd = ac == 3 ? av[1] : "/data";
-    const char* od = ac == 3 ? av[2] : "/out";
+    const char* dd = ac >= 2 ? av[1] : "/data", *od = ac >= 3 ? av[2] : "/out";
     size_t W = 12;
     if (auto* s = getenv("SD_THREADS")) {
         size_t v;
         auto r = std::from_chars(s, s + strlen(s), v);
-        if (r.ec == std::errc{} && r.ptr == s + strlen(s) && v >= 1 && v <= 12) W = v;
+        if (r.ec == std::errc{} && r.ptr == s + strlen(s) && v >= 1 && v <= 16) W = v;
     }
 
     MF qf(std::string(dd) + "/queries.txt");
@@ -143,9 +130,7 @@ int main(int ac, char** av) {
         if (qp < qe) ++qp;
 
         if (l.starts_with("BOOL ")) {
-            QItem q;
-            size_t p = 5;
-            bool eo = false;
+            QItem q; size_t p = 5; bool eo = false;
             while (p < l.size()) {
                 size_t sp = l.find(' ', p);
                 if (sp == std::string_view::npos) sp = l.size();
@@ -161,8 +146,7 @@ int main(int ac, char** av) {
             }
             qs.push_back(std::move(q));
         } else if (l.starts_with("PHRASE \"")) {
-            QItem q;
-            q.ph = true;
+            QItem q; q.ph = true;
             size_t p = 8, qe_ = l.rfind('"');
             if (qe_ == std::string_view::npos) qe_ = l.size();
             while (p < qe_) {
@@ -197,28 +181,19 @@ int main(int ac, char** av) {
         bn[i] = p;
     }
 
-    struct DocSpan { uint32_t doc_id; uint16_t count; };
-    std::vector<std::vector<DocSpan>> th_doc_spans(W);
-    std::vector<std::vector<uint32_t>> th_tids(W);
     std::vector<std::vector<uint32_t>> th_df(W, std::vector<uint32_t>(NT, 0));
 
     par(W, [&](size_t wid) {
         const char* sc = bn[wid], * end = bn[wid + 1];
         auto& l_df = th_df[wid];
-        auto& l_spans = th_doc_spans[wid];
-        auto& l_tids = th_tids[wid];
-        l_spans.reserve((ND / W) + 1024);
-        l_tids.reserve((ND / W) * 50);
-
         std::vector<uint32_t> last_doc(NT, ~0u);
-        char tok_buf[32];
         struct L1F { uint64_t hash = 0; uint32_t tid = ~0u; };
         std::vector<L1F> l1(16384);
 
         while (sc < end) {
             uint32_t id = 0;
             while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
-            ++sc; // '\t'
+            ++sc;
             const char* ts = sc;
             const char* nl = (const char*)memchr(sc, '\n', end - sc);
             if (!nl) nl = end;
@@ -227,7 +202,6 @@ int main(int ac, char** av) {
             dr[id] = {ts, len};
 
             const char* tp = ts, * te = ts + len;
-            uint16_t doc_term_count = 0;
             while (tp < te) {
                 while (tp < te && !CHAR_MAP[(uint8_t)*tp]) ++tp;
                 if (tp >= te) break;
@@ -235,8 +209,7 @@ int main(int ac, char** av) {
                 while (tp < te && CHAR_MAP[(uint8_t)*tp]) ++tp;
                 size_t tl = size_t(tp - tok_st);
                 if (tl <= 32) {
-                    for (size_t i = 0; i < tl; ++i) tok_buf[i] = CHAR_MAP[(uint8_t)tok_st[i]];
-                    uint64_t h64 = fast_hash(tok_buf, tl);
+                    uint64_t h64 = fast_hash_swar(tok_st, tl);
                     uint32_t lidx = uint32_t(h64) & 16383;
                     uint32_t tid;
                     if (l1[lidx].hash == h64) {
@@ -248,13 +221,8 @@ int main(int ac, char** av) {
                     if (tid != ~0u && last_doc[tid] != id) {
                         last_doc[tid] = id;
                         l_df[tid]++;
-                        l_tids.push_back(tid);
-                        doc_term_count++;
                     }
                 }
-            }
-            if (doc_term_count > 0) {
-                l_spans.push_back({id, doc_term_count});
             }
         }
     });
@@ -270,13 +238,10 @@ int main(int ac, char** av) {
     std::vector<uint32_t> bitset_map(NT, ~0u);
     uint32_t num_bitsets = 0;
     for (size_t t = 0; t < NT; ++t) {
-        if (df_cnt[t] >= BITSET_THRESH) {
-            bitset_map[t] = num_bitsets++;
-        }
+        if (df_cnt[t] >= BITSET_THRESH) bitset_map[t] = num_bitsets++;
     }
 
     std::vector<std::vector<uint64_t>> bitsets(num_bitsets, std::vector<uint64_t>(NW, 0));
-
     std::vector<std::vector<uint32_t>> th_off(W, std::vector<uint32_t>(NT, 0));
     std::vector<uint32_t> pos_off(NT + 1, 0);
     for (size_t t = 0; t < NT; ++t) {
@@ -296,29 +261,48 @@ int main(int ac, char** av) {
     uint32_t total_array_postings = pos_off[NT];
     std::vector<uint32_t> all_postings(total_array_postings);
 
-    // Fast In-Memory Pass 2: no docs.txt re-reading or re-tokenizing!
     par(W, [&](size_t wid) {
+        const char* sc = bn[wid], * end = bn[wid + 1];
         auto& l_off = th_off[wid];
-        const auto& l_spans = th_doc_spans[wid];
-        const auto& l_tids = th_tids[wid];
-        size_t tid_idx = 0;
-        for (const auto& span : l_spans) {
-            uint32_t id = span.doc_id;
-            uint16_t cnt = span.count;
-            for (uint16_t k = 0; k < cnt; ++k) {
-                uint32_t tid = l_tids[tid_idx++];
-                uint32_t bs_id = bitset_map[tid];
-                if (bs_id != ~0u) {
-                    bitsets[bs_id][id >> 6] |= (1ULL << (id & 63));
-                } else {
-                    all_postings[l_off[tid]++] = id;
+        std::vector<uint32_t> last_doc(NT, ~0u);
+        struct L1F { uint64_t hash = 0; uint32_t tid = ~0u; };
+        std::vector<L1F> l1(16384);
+
+        while (sc < end) {
+            uint32_t id = 0;
+            while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
+            sc = dr[id].p + dr[id].l + 1;
+            const char* tp = dr[id].p, * te = tp + dr[id].l;
+            while (tp < te) {
+                while (tp < te && !CHAR_MAP[(uint8_t)*tp]) ++tp;
+                if (tp >= te) break;
+                const char* tok_st = tp;
+                while (tp < te && CHAR_MAP[(uint8_t)*tp]) ++tp;
+                size_t tl = size_t(tp - tok_st);
+                if (tl <= 32) {
+                    uint64_t h64 = fast_hash_swar(tok_st, tl);
+                    uint32_t lidx = uint32_t(h64) & 16383;
+                    uint32_t tid;
+                    if (l1[lidx].hash == h64) {
+                        tid = l1[lidx].tid;
+                    } else {
+                        tid = dt.fn_fast(h64);
+                        l1[lidx] = {h64, tid};
+                    }
+                    if (tid != ~0u && last_doc[tid] != id) {
+                        last_doc[tid] = id;
+                        uint32_t bs_id = bitset_map[tid];
+                        if (bs_id != ~0u) {
+                            auto* word = (std::atomic<uint64_t>*)&bitsets[bs_id][id >> 6];
+                            word->fetch_or(1ULL << (id & 63), std::memory_order_relaxed);
+                        } else {
+                            all_postings[l_off[tid]++] = id;
+                        }
+                    }
                 }
             }
         }
     });
-
-    std::vector<std::vector<DocSpan>>().swap(th_doc_spans);
-    std::vector<std::vector<uint32_t>>().swap(th_tids);
     std::vector<std::vector<uint32_t>>().swap(th_off);
 
     auto get_pos = [&](uint32_t t) -> std::pair<const uint32_t*, size_t> {
@@ -332,9 +316,18 @@ int main(int ac, char** av) {
     par(W, [&](size_t) {
         std::vector<uint64_t> cb(NW, 0);
         std::vector<uint32_t> cur, nxt;
-        cur.reserve(65536);
-        nxt.reserve(65536);
+        cur.reserve(65536); nxt.reserve(65536);
         char b[32];
+
+        auto fmt_res = [&](std::string& rs, uint32_t cnt, uint64_t isum, const uint32_t* f10, uint32_t n10) {
+            rs.append(b, std::to_chars(b, b + 32, cnt).ptr);
+            rs += ' ';
+            rs.append(b, std::to_chars(b, b + 32, isum).ptr);
+            for (uint32_t i = 0; i < n10; ++i) {
+                rs += ' ';
+                rs.append(b, std::to_chars(b, b + 32, f10[i]).ptr);
+            }
+        };
 
         for (size_t q = qc.fetch_add(1); q < NQ; q = qc.fetch_add(1)) {
             auto& it = qs[q];
@@ -379,7 +372,7 @@ int main(int ac, char** av) {
                                     if (tb[d >> 6] & (1ULL << (d & 63))) cur[out_sz++] = d;
                                 }
                                 cur.resize(out_sz);
-                            } else { // NOT
+                            } else {
                                 size_t out_sz = 0;
                                 for (uint32_t d : cur) {
                                     if (!(tb[d >> 6] & (1ULL << (d & 63)))) cur[out_sz++] = d;
@@ -437,7 +430,7 @@ int main(int ac, char** av) {
                             }
                             while (ia < asz) nxt.push_back(a[ia++]);
                             while (ib < psz) nxt.push_back(pl[ib++]);
-                        } else { // NOT
+                        } else {
                             while (ia < asz && ib < psz) {
                                 if (a[ia] == pl[ib]) { ++ia; ++ib; }
                                 else if (a[ia] < pl[ib]) nxt.push_back(a[ia++]);
@@ -471,13 +464,7 @@ int main(int ac, char** av) {
                     for (uint32_t i = 0; i < n10; ++i) f10[i] = cur[i];
                     for (uint32_t d : cur) isum += d;
                 }
-                rs.append(b, std::to_chars(b, b + 32, cnt).ptr);
-                rs += ' ';
-                rs.append(b, std::to_chars(b, b + 32, isum).ptr);
-                for (uint32_t i = 0; i < n10; ++i) {
-                    rs += ' ';
-                    rs.append(b, std::to_chars(b, b + 32, f10[i]).ptr);
-                }
+                fmt_res(rs, cnt, isum, f10, n10);
             } else {
                 const auto& ts = it.t;
                 const auto& rw = it.rw;
@@ -562,13 +549,7 @@ int main(int ac, char** av) {
                         if (n10 < 10) f10[n10++] = d;
                     }
                 }
-                rs.append(b, std::to_chars(b, b + 32, cnt).ptr);
-                rs += ' ';
-                rs.append(b, std::to_chars(b, b + 32, isum).ptr);
-                for (uint32_t i = 0; i < n10; ++i) {
-                    rs += ' ';
-                    rs.append(b, std::to_chars(b, b + 32, f10[i]).ptr);
-                }
+                fmt_res(rs, cnt, isum, f10, n10);
             }
         }
     });

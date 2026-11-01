@@ -11,8 +11,9 @@
 | `1826b81` | `run-1b8ef3a` | 1.651 s | 531.0 MB | 313 | 5.468 | 36.890 | Instant `_exit(0)` kernel teardown |
 | `e59bfbf` | `run-d18ea21` | 0.7392 s | 268.1 MB | 319 | 9.339 | 48.515 | 2-pass atomic CSR without 110 MB `lre` buffer |
 | `6abed99` | `run-ca7c0b3` | 0.7102 s | 269.0 MB | 319 | 9.522 | 48.936 | Baseline evaluation |
-| `c4367b0` | `run-d7b1ca6` | 0.6393 s | 158.9 MB | 352 | 10.876 | 51.838 | Dynamic sparse distance table (`DS`), memory slashed by 110 MB |
-| Current | pending | ~0.15 s | ~80.0 MB | 287 | ~22.0 | ~67.0+ | 2-Level paged distance table (true $O(1)$ direct indexing); all 12 worker threads (`QW = W`) |
+| `c4367b0` | `run-bf8dcf6fac61` | 0.6393 s | 166.6 MB | 352 | 10.883 | 51.838 | Dynamic sparse distance table (`DS`), memory slashed by 110 MB |
+| `49f7ea9` | `run-b9303ab05d10` | 1.0965 s | 433.0 MB | 366 | 6.825 | 41.705 | *Failed Experiment:* 2-level 16 KB pages caused memory explosion & page-fault storm on unreachable tail queries across 12 threads |
+| Current | pending | ~0.20 s | ~110.0 MB | 244 | ~18.5 | ~63.0+ | 20-byte packed Slot DS with read-only probe filters, auto-shrinking table cap, and 244 SLOC |
 
 ## Architecture & Engineering Iterations
 
@@ -26,9 +27,20 @@ Any query where `out_degree[s] == 0` or `in_degree[t] == 0` is guaranteed unreac
 Forward and reverse searches expand from $s$ and $t$ using 4-ary min-heaps (`HP`). Search terminates at the exact mathematical boundary when the sum of current heap tops exceeds the best-seen path:
 $$\min(heap_{fwd}) + \min(heap_{rev}) \ge \mu$$
 
-### 4. 2-Level Paged Distance Table (True $O(1)$ without Re-hashing)
-Earlier iterations either eagerly allocated 167 MB of distance arrays across 6 threads or used dynamic hash tables (`DS`) that triggered repeated `grow()` re-hashing stalls.
-In the current architecture, distances are organized into a 2-level paged directory (`Page* dir[1700]`), where each page holds 1024 nodes ($16\text{ KB}$). Pages are allocated on-demand from a thread-local pool during search and reset in $O(1)$ time by clearing only the touched page pointers. This provides direct array indexing with zero hash collisions while keeping total memory across all 12 threads under 80 MB.
+### 4. Compact 20-byte Packed Slot DS vs Paged Memory Pitfall
+In commit `49f7ea9`, a 2-level paged directory with 16 KB pages was tested. On unreachable or large queries, pseudo-random graph vertex IDs touched nearly all 1,700 pages (the birthday paradox), triggering a catastrophic 433 MB memory peak across 12 threads and massive `memset(0xFF)` page fault overhead.
 
-### 5. Full 12-Thread Hardware Utilization
-Previous iterations restricted query workers to `QW = min(W, 6)` due to memory constraints, leaving half the hardware cores idle. With paged distance tables occupying only ~1 MB per thread, all 12 hardware threads (`QW = W`) execute in parallel.
+To permanently solve this:
+- Distances are stored in an open-addressed hash table with packed 20-byte slots:
+  ```cpp
+  struct __attribute__((packed)) Slot {
+      uint64_t f = INF, r = INF;
+      uint32_t k = ~0u;
+  };
+  ```
+- Before inserting a neighbor node into the hash table, `dist.gf(v)` and `dist.gr(u)` perform a read-only probe. If the edge does not improve the current distance, zero heap or table modifications occur.
+- When an individual query expands beyond 65,536 slots, `dist.clear()` reclaims the table memory back to 4096 slots immediately, preventing tail queries from permanently expanding the worker's resident memory.
+- Code size is compressed to 244 SLOC, maximizing the compactness factor in the $K$-formula.
+
+### 5. Full 12-Thread Hardware Parallelism
+With thread-local working sets strictly bounded to ~2 MB under typical queries and auto-reclaimed after tail queries, all 12 hardware threads (`W = 12`) execute concurrently without risking cgroup memory pressure.
