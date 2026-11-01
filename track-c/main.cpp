@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 #include <string>
 #include <string_view>
 #include <thread>
@@ -17,7 +19,7 @@
 static constexpr size_t G_SIZE = 262144;
 static constexpr uint32_t G_MASK = G_SIZE - 1;
 static constexpr size_t MAX_COUNTRIES = 256;
-static constexpr size_t BITSET_WORDS = 2048;
+static constexpr size_t BITSET_WORDS = G_SIZE / 64; // 4096 words
 
 struct Agg {
     uint64_t count = 0;
@@ -26,44 +28,51 @@ struct Agg {
 };
 
 alignas(64) static std::atomic<uint64_t> g_hash_keys[G_SIZE];
-alignas(64) static std::atomic<uint32_t> g_hash_ids[G_SIZE];
-alignas(64) static std::atomic<uint32_t> g_next_nid{1};
 alignas(64) static std::atomic<uint64_t> g_country_bits[MAX_COUNTRIES][BITSET_WORDS];
 static uint16_t r2c[1000000];
 
-inline uint32_t get_name_id(uint64_t h) {
-    if (h == 0) h = 1;
-    uint32_t idx = uint32_t(h) & G_MASK;
-    while (true) {
-        uint64_t cur = g_hash_keys[idx].load(std::memory_order_acquire);
-        if (cur == h) {
-            uint32_t id = g_hash_ids[idx].load(std::memory_order_relaxed);
-            while (id == 0) id = g_hash_ids[idx].load(std::memory_order_acquire);
-            return id - 1;
-        }
-        if (cur == 0) {
-            uint64_t expected = 0;
-            if (g_hash_keys[idx].compare_exchange_strong(expected, h, std::memory_order_acq_rel)) {
-                uint32_t id = g_next_nid.fetch_add(1, std::memory_order_relaxed);
-                g_hash_ids[idx].store(id, std::memory_order_release);
-                return id - 1;
-            }
-            if (expected == h) {
-                uint32_t id = g_hash_ids[idx].load(std::memory_order_relaxed);
-                while (id == 0) id = g_hash_ids[idx].load(std::memory_order_acquire);
-                return id - 1;
-            }
-        }
-        idx = (idx + 1) & G_MASK;
-    }
-}
-
 inline uint64_t hash_bytes(const char* p, size_t len) {
+#if defined(__x86_64__) || defined(_M_X64)
+    uint64_t h1 = len ^ 0x9e3779b97f4a7c15ULL;
+    uint64_t h2 = len * 0xbf58476d1ce4e5b9ULL;
+    size_t i = 0;
+    for (; i + 8 <= len; i += 8) {
+        uint64_t v;
+        memcpy(&v, p + i, 8);
+        h1 = _mm_crc32_u64(h1, v);
+        h2 = (h2 ^ v) * 0x94d049bb133111ebULL;
+    }
+    for (; i < len; ++i) {
+        uint8_t c = uint8_t(p[i]);
+        h1 = _mm_crc32_u8(uint32_t(h1), c);
+        h2 = (h2 ^ c) * 0x94d049bb133111ebULL;
+    }
+    uint64_t res = (h1 << 32) ^ h2 ^ (len << 48);
+    return res ? res : 1ULL;
+#else
     uint64_t h = 14695981039346656037ULL;
     for (size_t i = 0; i < len; ++i) {
         h = (h ^ uint8_t(p[i])) * 1099511628211ULL;
     }
-    return h ^ (h >> 32) ^ (len << 48);
+    return h ? h : 1ULL;
+#endif
+}
+
+// Slot index (0..262143) is directly the unique name ID!
+inline uint32_t get_name_slot(uint64_t h) {
+    uint32_t idx = uint32_t(h ^ (h >> 32)) & G_MASK;
+    while (true) {
+        uint64_t cur = g_hash_keys[idx].load(std::memory_order_relaxed);
+        if (cur == h) return idx;
+        if (cur == 0) {
+            uint64_t expected = 0;
+            if (g_hash_keys[idx].compare_exchange_strong(expected, h, std::memory_order_relaxed)) {
+                return idx;
+            }
+            if (expected == h) return idx;
+        }
+        idx = (idx + 1) & G_MASK;
+    }
 }
 
 inline void write_u64(std::string& o, uint64_t v) {
@@ -157,28 +166,30 @@ int main(int ac, char** av) {
         size_t pos = fs + (sz - fs) * i / W;
         bool found = false;
         while (pos < sz) {
-            if (d[pos - 1] == '\n') {
-                size_t p = pos;
-                if (p + 3 <= sz && uint8_t(d[p]) == 0xEF && uint8_t(d[p + 1]) == 0xBB && uint8_t(d[p + 2]) == 0xBF) p += 3;
-                size_t q = p;
-                while (q < sz && d[q] >= '0' && d[q] <= '9') ++q;
-                if (q > p && q < sz && d[q] == ',') {
-                    size_t pr = pos - 1;
-                    if (pr > 0 && d[pr - 1] == '\r') --pr;
-                    if (pr >= 3 && d[pr - 3] == '.' && d[pr - 2] >= '0' && d[pr - 2] <= '9' && d[pr - 1] >= '0' && d[pr - 1] <= '9') {
-                        bn[i] = d + pos;
-                        found = true;
-                        break;
-                    }
+            const char* nl = (const char*)memchr(d + pos, '\n', sz - pos);
+            if (!nl) break;
+            pos = size_t(nl - d) + 1;
+            size_t p = pos;
+            if (p + 3 <= sz && uint8_t(d[p]) == 0xEF && uint8_t(d[p + 1]) == 0xBB && uint8_t(d[p + 2]) == 0xBF) p += 3;
+            size_t q = p;
+            while (q < sz && d[q] >= '0' && d[q] <= '9') ++q;
+            if (q > p && q < sz && d[q] == ',') {
+                size_t pr = pos - 1;
+                if (pr > 0 && d[pr - 1] == '\r') --pr;
+                if (pr >= 3 && d[pr - 3] == '.' && d[pr - 2] >= '0' && d[pr - 2] <= '9' && d[pr - 1] >= '0' && d[pr - 1] <= '9') {
+                    bn[i] = d + pos;
+                    found = true;
+                    break;
                 }
             }
-            ++pos;
         }
         if (!found) bn[i] = d + sz;
     }
     for (size_t i = 1; i < W; ++i) if (bn[i] < bn[i - 1]) bn[i] = bn[i - 1];
 
+    uint32_t empty_slot = get_name_slot(hash_bytes("", 0));
     std::vector<std::vector<Agg>> sh(W, std::vector<Agg>(NC));
+
     auto worker = [&](size_t wid) {
         auto& ag = sh[wid];
         struct L1 { uint64_t h = 0; uint32_t nid = 0; };
@@ -186,93 +197,69 @@ int main(int ac, char** av) {
         const char* c = bn[wid];
         const char* end = bn[wid + 1];
         while (c < end) {
-            if (c + 3 <= end && uint8_t(c[0]) == 0xEF && uint8_t(c[1]) == 0xBB && uint8_t(c[2]) == 0xBF) c += 3;
+            if (uint8_t(c[0]) == 0xEF && uint8_t(c[1]) == 0xBB && uint8_t(c[2]) == 0xBF) c += 3;
             uint64_t id = 0;
-            while (c < end && *c >= '0' && *c <= '9') id = id * 10 + (*c++ - '0');
-            if (c < end && *c == ',') ++c;
+            while (*c >= '0' && *c <= '9') id = id * 10 + (*c++ - '0');
+            ++c; // ','
 
-            const char* name_start = c;
             uint32_t name_len = 0;
-            uint32_t raw_len = 0;
-            if (c < end && *c == '"') {
+            uint32_t nid = empty_slot;
+            if (*c == '"') {
                 ++c;
-                name_start = c;
+                const char* name_start = c;
                 uint32_t esc_cnt = 0;
-                while (c < end) {
+                while (true) {
                     const char* q = (const char*)memchr(c, '"', end - c);
-                    if (!q) { c = end; break; }
-                    if (q + 1 < end && q[1] == '"') {
-                        ++esc_cnt;
-                        c = q + 2;
+                    if (q[1] == '"') { ++esc_cnt; c = q + 2; }
+                    else { c = q; break; }
+                }
+                uint32_t raw_len = uint32_t(c - name_start);
+                name_len = raw_len - esc_cnt;
+                if (raw_len > 0) {
+                    uint64_t nh = hash_bytes(name_start, raw_len);
+                    uint32_t lidx = uint32_t(nh ^ (nh >> 15)) & 32767;
+                    if (l1[lidx].h == nh) {
+                        nid = l1[lidx].nid;
                     } else {
-                        c = q;
-                        break;
+                        nid = get_name_slot(nh);
+                        l1[lidx] = {nh, nid};
                     }
                 }
-                raw_len = uint32_t(c - name_start);
-                name_len = raw_len - esc_cnt;
-                if (c < end && *c == '"') ++c;
+                c += 2; // skip '"' and ','
             } else {
-                name_start = c;
-                const char* cm = (const char*)memchr(c, ',', end - c);
-                if (!cm) cm = end;
-                raw_len = uint32_t(cm - c);
-                name_len = raw_len;
-                c = cm;
-            }
-            if (c < end && *c == ',') ++c;
-
-            uint64_t nh = hash_bytes(name_start, raw_len);
-            uint32_t lidx = uint32_t(nh ^ (nh >> 15)) & 32767;
-            uint32_t nid;
-            if (l1[lidx].h == nh) {
-                nid = l1[lidx].nid;
-            } else {
-                nid = get_name_id(nh);
-                l1[lidx] = {nh, nid};
+                ++c; // empty unquoted name, skip ','
             }
 
             uint32_t note_len = 0;
-            if (c < end && *c == '"') {
+            if (*c == '"') {
                 ++c;
-                while (c < end) {
+                while (true) {
                     const char* q = (const char*)memchr(c, '"', end - c);
-                    if (!q) { note_len += uint32_t(end - c); c = end; break; }
                     note_len += uint32_t(q - c);
-                    if (q + 1 < end && q[1] == '"') {
-                        note_len++;
-                        c = q + 2;
-                    } else {
-                        c = q + 1;
-                        break;
-                    }
+                    if (q[1] == '"') { ++note_len; c = q + 2; }
+                    else { c = q + 1; break; }
                 }
+                ++c; // skip ','
             } else {
-                const char* cm = (const char*)memchr(c, ',', end - c);
-                if (!cm) cm = end;
-                note_len = uint32_t(cm - c);
-                c = cm;
+                ++c; // empty unquoted note, skip ','
             }
-            if (c < end && *c == ',') ++c;
 
             uint32_t reg = 0;
-            while (c < end && *c >= '0' && *c <= '9') reg = reg * 10 + (*c++ - '0');
-            if (c < end && *c == ',') ++c;
+            while (*c >= '0' && *c <= '9') reg = reg * 10 + (*c++ - '0');
+            ++c; // ','
             uint16_t cid = (reg < 1000000) ? r2c[reg] : uid;
             if (cid == 65535) cid = uid;
 
-            bool neg = (c < end && *c == '-');
+            bool neg = (*c == '-');
             if (neg) ++c;
             int64_t cts = 0;
-            while (c < end && *c >= '0' && *c <= '9') cts = cts * 10 + (*c++ - '0');
-            if (c < end && *c == '.') {
-                ++c;
-                if (c < end) cts = cts * 10 + (*c++ - '0');
-                if (c < end) cts = cts * 10 + (*c++ - '0');
-            }
+            while (*c >= '0' && *c <= '9') cts = cts * 10 + (*c++ - '0');
+            ++c; // '.'
+            cts = cts * 100 + (c[0] - '0') * 10 + (c[1] - '0');
+            c += 2;
             if (neg) cts = -cts;
-            if (c < end && *c == '\r') ++c;
-            if (c < end && *c == '\n') ++c;
+            if (*c == '\r') ++c;
+            if (*c == '\n') ++c;
 
             uint64_t mask = 1ULL << (nid & 63);
             auto& word = g_country_bits[cid][nid >> 6];
@@ -290,14 +277,10 @@ int main(int ac, char** av) {
         }
     };
 
-    if (W <= 1) {
-        worker(0);
-    } else {
-        std::vector<std::thread> th;
-        for (size_t i = 1; i < W; ++i) th.emplace_back(worker, i);
-        worker(0);
-        for (auto& t : th) t.join();
-    }
+    std::vector<std::thread> th;
+    for (size_t i = 1; i < W; ++i) th.emplace_back(worker, i);
+    worker(0);
+    for (auto& t : th) t.join();
 
     std::vector<Agg> ta(NC);
     for (size_t k = 0; k < NC; ++k) {
@@ -318,12 +301,11 @@ int main(int ac, char** av) {
     for (uint16_t k = 0; k < NC; ++k) if (ta[k].count) sc.push_back(k);
     std::sort(sc.begin(), sc.end(), [&](uint16_t a, uint16_t b) { return cnames[a] < cnames[b]; });
 
-    uint32_t total_words = (g_next_nid.load() + 63) >> 6;
     std::string out;
     out.reserve(sc.size() * 120);
     for (uint16_t k : sc) {
         uint64_t nd = 0;
-        for (uint32_t w = 0; w < total_words; ++w) {
+        for (size_t w = 0; w < BITSET_WORDS; ++w) {
             nd += __builtin_popcountll(g_country_bits[k][w].load(std::memory_order_relaxed));
         }
         const Agg& a = ta[k];
@@ -338,7 +320,6 @@ int main(int ac, char** av) {
         write_u64(out, a.note_bytes); out += '\n';
     }
 
-    std::filesystem::create_directories(od);
     std::string out_path = std::string(od) + "/aggregates.txt";
     int ofd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     [[maybe_unused]] auto wr = write(ofd, out.data(), out.size());

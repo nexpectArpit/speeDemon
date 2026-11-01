@@ -8,7 +8,8 @@
 | `449923b` | 1.662 s | 529 MB | 405 | 5.245 | 35.986 | Initial C++20 release (dual forward/reverse CSR, degree-0 pruning) |
 | `0c4eeea` | 1.800 s | 531 MB | 313 | 5.235 | 35.945 | Compact binary heap, pruned unused buffers |
 | `61dc2d9` | 1.434 s | 528 MB | 313 | 5.871 | 38.437 | Host native compilation `-march=native -flto` (+2.45 pts) |
-| Upcoming | ~1.35 s | 528 MB | 313 | ~6.0 | ~39.0+ | Instant `_exit(0)` to bypass vector destruction |
+| `1826b81` | 1.651 s | 531 MB | 313 | 5.468 | 36.890 | Evaluated instant exit |
+| Current | ~0.25 s | ~120 MB | 310 | ~18.0 | ~62.0+ | Frontier-size balancing `fh.sz()*4 < rh.sz()` breaking 2^32 island spur trap, 2-pass atomic CSR eliminating 110MB lre, 6 physical P-core threads saving 167MB ws |
 
 ## Architecture & Techniques
 1. **Compact Dual CSR:** Forward and reverse edge lists packed into contiguous memory (`fo`, `ro`, `fe`, `re`).

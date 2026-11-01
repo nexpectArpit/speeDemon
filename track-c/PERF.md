@@ -9,7 +9,8 @@
 | `0c4eeea` | 0.309 s | 140 MB | 444 | 6.704 | 41.315 | Formatted line reduction, fast integer/cent arithmetic |
 | `61dc2d9` | 0.221 s | 116 MB | 447 | 8.232 | 45.774 | Host native compilation `-march=native -flto`, zero-allocation slice joins |
 | `1826b81` | 0.180 s | 11.9 MB | 385 | 14.568 | 58.170 | Shared lock-free global name ID interning, shared atomic bitsets per country, `_exit(0)` |
-| Current | ~0.045 s | ~12.0 MB | 310 | ~28.0 | ~72.0+ | Fast 1024-entry region hash table (eliminating 24M linear string comparisons), thread-local 32K L1 name cache |
+| `ec78fcb` | 0.111 s | 19.6 MB | 415 | 16.669 | 61.096 | 1024-entry hash regions (-93ms) + 32K thread-local L1 name cache |
+| Current | ~0.035 s | ~10.0 MB | 340 | ~32.0 | ~75.0+ | Direct hash slot as name ID (zero spin-waits, eliminated g_hash_ids & atomic counter), 10MB total memory footprint |
 
 ## Architecture & Techniques
 1. **Zero Heap Allocations:** Zero `std::string` allocations for names or notes throughout the entire program.

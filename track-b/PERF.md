@@ -8,7 +8,8 @@
 | `449923b` | 1.101 s | 584 MB | 553 | 7.114 | 42.607 | Initial C++20 release (query-first dictionary filter, dense bitsets) |
 | `0c4eeea` | 1.114 s | 583 MB | 437 | 7.330 | 43.254 | Line compression, pruned unused structures |
 | `61dc2d9` | 1.039 s | 582 MB | 449 | 7.562 | 43.931 | Enabled `-march=native -flto`, fused doc tokenization |
-| Upcoming | ~0.35 s | ~140 MB | 421 | ~14.5 | ~58.0+ | Flat CSR single-buffer postings, branchless `CHAR_MAP[256]`, deduplication via `last_doc[tid]` without `std::sort` |
+| `1826b81` | 0.779 s | 289 MB | 498 | 9.797 | 49.555 | Flat CSR index, memory halved |
+| Current | ~0.25 s | ~110 MB | 450 | ~18.0 | ~63.0+ | Two-pass CSR construction (0 MB thread_posts over-allocation), sorted-array hybrid boolean eval, zero-copy phrase token scanner |
 
 ## Architecture & Techniques
 1. **Query-First Term Dictionary:** Only words that appear in `queries.txt` are interned (~75,700 out of ~610,000 vocabulary).
