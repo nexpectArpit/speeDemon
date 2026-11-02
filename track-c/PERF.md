@@ -37,3 +37,11 @@ This eliminates heap allocations entirely during the 3.32-million-row scan.
 
 ### 4. Shared Atomic Bitsets for Country-Name Pairs
 Distinct names per country are tracked using a global atomic bitmap `g_country_bits[242][4096]`. Setting a bit is an atomic `fetch_or` on a 64-bit word. At the end, `__builtin_popcountll` counts distinct names per country in microseconds.
+
+## Verified correction — 2026-11-02
+
+The pending forecast above is not measured evidence. The public feed at 09:44:18Z scores fdbf51b at 0.075977s / 18,219,008 bytes / S391 / 65.831097 points (run-2249f7c687d1).
+
+This revision fixes hash-slot publication using acquire/release nonzero encoded length readiness. Exact name bytes live in persistent per-worker arenas, and dense IDs avoid touching bitmap pages for unused hash slots. Chunk boundaries use an unbounded forward record search with BOM handling, preserving long names.
+
+Independent verification reproduces both old defects and passes58 participant executions with oracle comparisons, ASan/UBSan and bounded TSan. A root full-public baseline execution also reproduced the race: country QCM distinct count52824 instead of52823. The fixed binary matches the published full-public SHA d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536. This invalidates baseline timing as a correct scored comparator. No fresh board or stable speed claim exists. Source SHA422195d1e486246ccaf698d4f42c959cf643302528e39373c573587d6b851e40. Evidence: AUDIT/rank78-20261102 outside build contexts.

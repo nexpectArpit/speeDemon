@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
@@ -28,7 +29,9 @@ struct Agg {
 };
 
 alignas(64) static std::atomic<uint64_t> g_hash_keys[G_SIZE];
-alignas(64) static std::atomic<const char*> g_name_ptr[G_SIZE];
+alignas(64) static const char* g_name_ptr[G_SIZE];
+alignas(64) static uint32_t g_name_id[G_SIZE];
+static std::atomic<uint32_t> g_name_count{0};
 alignas(64) static std::atomic<uint32_t> g_name_len[G_SIZE];
 alignas(64) static std::atomic<uint64_t> g_country_bits[MAX_COUNTRIES][BITSET_WORDS];
 static uint8_t r2c[1000000];
@@ -60,30 +63,41 @@ inline uint64_t hash_bytes(const char* p, size_t len) {
 #endif
 }
 
-inline uint32_t get_name_slot(const char* s, uint32_t len, uint64_t h) {
+struct NameArena {
+    std::vector<std::unique_ptr<char[]>> blocks;
+    size_t used = 0, capacity = 0;
+    const char* copy(const char* s, uint32_t len) {
+        if (!len) return "";
+        if (capacity - used < len) {
+            capacity = std::max<size_t>(65536, len);
+            blocks.emplace_back(new char[capacity]);
+            used = 0;
+        }
+        char* p = blocks.back().get() + used;
+        memcpy(p, s, len);
+        used += len;
+        return p;
+    }
+};
+
+inline uint32_t get_name_slot(const char* s, uint32_t len, uint64_t h, NameArena& arena) {
     uint32_t idx = uint32_t(h ^ (h >> 32)) & G_MASK;
-    while (true) {
+    for (;;) {
         uint64_t cur = g_hash_keys[idx].load(std::memory_order_relaxed);
-        if (cur == h) {
-            uint32_t slen = g_name_len[idx].load(std::memory_order_acquire);
-            if (slen == len) {
-                const char* sp = g_name_ptr[idx].load(std::memory_order_relaxed);
-                if (!memcmp(sp, s, len)) return idx;
-            }
-        } else if (cur == 0) {
+        if (!cur) {
             uint64_t expected = 0;
             if (g_hash_keys[idx].compare_exchange_strong(expected, h, std::memory_order_relaxed)) {
-                g_name_ptr[idx].store(s, std::memory_order_relaxed);
-                g_name_len[idx].store(len, std::memory_order_release);
+                g_name_ptr[idx] = arena.copy(s, len);
+                g_name_id[idx] = g_name_count.fetch_add(1, std::memory_order_relaxed);
+                g_name_len[idx].store(len + 1, std::memory_order_release);
                 return idx;
             }
-            if (expected == h) {
-                uint32_t slen = g_name_len[idx].load(std::memory_order_acquire);
-                if (slen == len) {
-                    const char* sp = g_name_ptr[idx].load(std::memory_order_relaxed);
-                    if (!memcmp(sp, s, len)) return idx;
-                }
-            }
+            cur = expected;
+        }
+        if (cur == h) {
+            uint32_t ready;
+            while (!(ready = g_name_len[idx].load(std::memory_order_acquire))) {}
+            if (ready == len + 1 && !memcmp(g_name_ptr[idx], s, len)) return idx;
         }
         idx = (idx + 1) & G_MASK;
     }
@@ -162,35 +176,25 @@ int main(int ac, char** av) {
     bn[W] = d + sz;
 
     for (size_t i = 1; i < W; ++i) {
-        size_t target = sz * i / W;
-        bool found = false;
-        for (size_t delta = 0; delta < 65536 && target + delta < sz; ++delta) {
-            size_t pos = target + delta;
-            if (d[pos] == '\n') {
-                size_t p = pos + 1;
-                if (p >= sz) { bn[i] = d + sz; found = true; break; }
-                while (p < sz && d[p] >= '0' && d[p] <= '9') ++p;
-                if (p < sz && d[p] == ',' && (p + 1 < sz) && (d[p + 1] == '"' || d[p + 1] == ',')) {
-                    bn[i] = d + pos + 1;
-                    found = true;
-                    break;
-                }
+        const char* p = d + sz * i / W;
+        bn[i] = d + sz;
+        while (p < d + sz) {
+            const char* nl = (const char*)memchr(p, '\n', d + sz - p);
+            if (!nl) break;
+            const char* start = nl + 1;
+            p = start;
+            if (d + sz - p >= 3 && uint8_t(p[0]) == 0xef && uint8_t(p[1]) == 0xbb && uint8_t(p[2]) == 0xbf) p += 3;
+            const char* digits = p;
+            while (p < d + sz && *p >= '0' && *p <= '9') ++p;
+            if (p > digits && d + sz - p >= 2 && *p == ',' && (p[1] == '"' || p[1] == ',')) {
+                bn[i] = start;
+                break;
             }
         }
-        if (!found) {
-            for (size_t pos = target; pos > 0 && pos + 65536 > target; --pos) {
-                if (d[pos] == '\n') {
-                    bn[i] = d + pos;
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if (!found) bn[i] = d + sz;
     }
-    for (size_t i = 1; i < W; ++i) if (bn[i] < bn[i - 1]) bn[i] = bn[i - 1];
-
-    uint32_t empty_slot = get_name_slot("", 0, hash_bytes("", 0));
+    std::vector<NameArena> arenas(W);
+    uint32_t empty_slot = get_name_slot("", 0, hash_bytes("", 0), arenas[0]);
+    uint32_t empty_id = g_name_id[empty_slot];
     std::vector<std::vector<Agg>> sh(W, std::vector<Agg>(NC));
 
     auto worker = [&](size_t wid) {
@@ -206,7 +210,7 @@ int main(int ac, char** av) {
             ++c; // ','
 
             uint32_t name_len = 0;
-            uint32_t nid = empty_slot;
+            uint32_t nid = empty_id;
             if (*c == '"') {
                 ++c;
                 const char* name_start = c;
@@ -224,8 +228,9 @@ int main(int ac, char** av) {
                     if (l1[lidx].hash == nh && l1[lidx].len == raw_len && !memcmp(l1[lidx].p, name_start, raw_len)) {
                         nid = l1[lidx].slot;
                     } else {
-                        nid = get_name_slot(name_start, raw_len, nh);
-                        l1[lidx] = {nh, name_start, raw_len, nid};
+                        uint32_t slot = get_name_slot(name_start, raw_len, nh, arenas[wid]);
+                        nid = g_name_id[slot];
+                        l1[lidx] = {nh, g_name_ptr[slot], raw_len, nid};
                     }
                 }
                 c += 2; // skip '"' and ','
@@ -309,7 +314,7 @@ int main(int ac, char** av) {
     out.reserve(sc.size() * 120);
     for (uint8_t k : sc) {
         uint64_t nd = 0;
-        for (size_t w = 0; w < BITSET_WORDS; ++w) {
+        for (size_t w = 0, words = (g_name_count.load(std::memory_order_relaxed) + 63) / 64; w < words; ++w) {
             nd += __builtin_popcountll(g_country_bits[k][w].load(std::memory_order_relaxed));
         }
         char buf[256];
