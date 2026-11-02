@@ -44,3 +44,11 @@ This guarantees portable synchronization without invoking undefined behavior.
 
 ### 5. Instant Process Teardown (`_exit(0)`)
 Calling `_exit(0)` bypasses vector destructors for `all_postings`, `bitsets`, and `res`, saving tens of milliseconds at process termination.
+
+## Final local iteration — 2026-11-02
+
+The prior pending projection is withdrawn as measured evidence. Feed generated09:44:18Z records fdbf51b at0.853362s /94,298,112bytes /S664 /52.700144points (run-e9dc9e940c5f).
+
+This candidate keeps exact normalized query bytes in a growable dictionary. Short-token cache keys encode all normalized bytes directly; long tokens verify exemplar bytes and lengths. AVX2 scans token boundaries in32-byte blocks on supported x86 builds, with an exact scalar fallback. Document partitions align to64-ID bitmap words, giving one writer per word and allowing ordinary OR. Dense phrase anchors retain ordered bitmap unpacking. Dense output sums use weighted masked popcounts, enumerating at most the first10 IDs for dense words.
+
+The first NEON/always-hashed candidate was rejected after a slower native trend. Final source SHA bab7087e9622edc5b015c09a39eedee48c0ebe5fd191cb9b6dfe3e95980e8228 passes60 focused independent optimized/sanitizer regression executions plus dictionary-growth/collision, cache, tokenizer and dense-sum units. Official check.py offline image build/allowlist/sandbox and full-public output SHA pass. Native paired timing is noisy and not accepted scoring evidence; no new board points are claimed. Artifacts AUDIT/rank78-20261102 outside build contexts.

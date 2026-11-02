@@ -2,7 +2,6 @@
 #include <array>
 #include <atomic>
 #include <charconv>
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -62,31 +61,120 @@ inline uint64_t fast_hash_swar(const char* p, size_t len) {
     return (h ^ (h >> 32)) | (uint64_t(len) << 56) | 1ULL;
 }
 
-struct DE { uint64_t h64 = 0; uint32_t id = 0; };
+inline bool same_word(const char* a, const char* b, size_t length) {
+    size_t i = 0;
+    for (; i + 8 <= length; i += 8) {
+        uint64_t x, y;
+        memcpy(&x, a + i, 8); memcpy(&y, b + i, 8);
+        if ((x | 0x2020202020202020ULL) != (y | 0x2020202020202020ULL)) return false;
+    }
+    for (; i < length; ++i) if ((uint8_t(a[i]) | 32) != (uint8_t(b[i]) | 32)) return false;
+    return true;
+}
 
+struct DE { uint64_t h64 = 0; uint32_t id = 0, key = 0; };
 struct Dict {
     std::vector<DE> tb{TS};
+    std::vector<char> keys;
     uint32_t count = 0;
+    void grow() {
+        auto old = std::move(tb);
+        tb = std::vector<DE>(old.size() * 2);
+        for (const auto& e : old) if (e.id) {
+            uint32_t x = uint32_t(e.h64) & uint32_t(tb.size() - 1);
+            while (tb[x].id) x = (x + 1) & uint32_t(tb.size() - 1);
+            tb[x] = e;
+        }
+    }
+    bool equal(const DE& e, const char* s, size_t n) const {
+        return (e.key >> 24) == n && same_word(keys.data() + (e.key & 0xffffffu), s, n);
+    }
     uint32_t in(std::string_view s) {
         uint64_t h = fast_hash_swar(s.data(), s.size());
-        uint32_t x = uint32_t(h) & TM;
+        uint32_t mask = uint32_t(tb.size() - 1), x = uint32_t(h) & mask;
         while (tb[x].id) {
-            if (tb[x].h64 == h) return tb[x].id - 1;
-            x = (x + 1) & TM;
+            if (tb[x].h64 == h && equal(tb[x], s.data(), s.size())) return tb[x].id - 1;
+            x = (x + 1) & mask;
         }
+        if ((count + 1) * 2 > tb.size()) { grow(); return in(s); }
         uint32_t id = count++;
-        tb[x] = {h, id + 1};
+        // At most50000 queries x8 terms x32 bytes fits a24-bit arena offset.
+        uint32_t key = uint32_t(keys.size()) | (uint32_t(s.size()) << 24);
+        keys.insert(keys.end(), s.begin(), s.end());
+        tb[x] = {h, id + 1, key};
         return id;
     }
-    inline uint32_t fn_fast(uint64_t h) const {
-        uint32_t x = uint32_t(h) & TM;
+    uint32_t fn_fast(uint64_t h, const char* s, size_t n) const {
+        uint32_t mask = uint32_t(tb.size() - 1), x = uint32_t(h) & mask;
         while (tb[x].id) {
-            if (tb[x].h64 == h) return tb[x].id - 1;
-            x = (x + 1) & TM;
+            if (tb[x].h64 == h && equal(tb[x], s, n)) return tb[x].id - 1;
+            x = (x + 1) & mask;
         }
         return ~0u;
     }
 };
+
+struct TokenCache {
+    struct Entry { uint64_t key = 0; uint32_t tid = ~0u, offset = 0; };
+    std::vector<Entry> entries{16384};
+    std::vector<uint8_t> lengths = std::vector<uint8_t>(16384);
+    uint32_t lookup(const Dict& dict, const char* base, const char* s, size_t n) {
+        uint64_t key = 0;
+        if (n <= 8) {
+            memcpy(&key, s, n);
+            key |= 0x2020202020202020ULL;
+            if (n < 8) key &= (1ULL << (8 * n)) - 1;
+        } else key = fast_hash_swar(s, n);
+        uint32_t index = uint32_t(((key ^ (key >> 32)) * 0x9e3779b97f4a7c15ULL) >> 50);
+        auto& e = entries[index];
+        if (e.key == key && lengths[index] == n && (n <= 8 || same_word(base + e.offset, s, n))) return e.tid;
+        uint64_t h = n <= 8 ? fast_hash_swar(s, n) : key;
+        uint32_t tid = dict.fn_fast(h, s, n);
+        e = {key, tid, uint32_t(s - base)};
+        lengths[index] = uint8_t(n);
+        return tid;
+    }
+};
+
+template<class F> inline void for_each_token(const char* p, const char* end, F consume) {
+#if defined(__AVX2__)
+    const char* start = p;
+    uint32_t previous = 0;
+    while (size_t(end - p) >= 32) {
+        __m256i v = _mm256_loadu_si256((const __m256i*)p);
+        __m256i lower = _mm256_or_si256(v, _mm256_set1_epi8(32));
+        __m256i letters = _mm256_and_si256(_mm256_cmpgt_epi8(lower, _mm256_set1_epi8('a' - 1)), _mm256_cmpgt_epi8(_mm256_set1_epi8('z' + 1), lower));
+        __m256i digits = _mm256_and_si256(_mm256_cmpgt_epi8(v, _mm256_set1_epi8('0' - 1)), _mm256_cmpgt_epi8(_mm256_set1_epi8('9' + 1), v));
+        uint32_t mask = uint32_t(_mm256_movemask_epi8(_mm256_or_si256(letters, digits)));
+        uint32_t changes = mask ^ ((mask << 1) | previous);
+        while (changes) {
+            unsigned bit = __builtin_ctz(changes);
+            if ((mask >> bit) & 1) start = p + bit;
+            else consume(start, size_t(p + bit - start));
+            changes &= changes - 1;
+        }
+        previous = mask >> 31;
+        p += 32;
+    }
+    for (; p < end; ++p) {
+        uint32_t current = CHAR_MAP[uint8_t(*p)] != 0;
+        if (current != previous) {
+            if (current) start = p;
+            else consume(start, size_t(p - start));
+            previous = current;
+        }
+    }
+    if (previous) consume(start, size_t(end - start));
+#else
+    while (p < end) {
+        while (p < end && !CHAR_MAP[uint8_t(*p)]) ++p;
+        if (p == end) break;
+        const char* start = p;
+        while (p < end && CHAR_MAP[uint8_t(*p)]) ++p;
+        consume(start, size_t(p - start));
+    }
+#endif
+}
 
 enum class Op : uint8_t { AND, OR, NOT };
 
@@ -170,6 +258,7 @@ int main(int ac, char** av) {
     uint32_t ND = 0;
     while (last < de && *last >= '0' && *last <= '9') ND = ND * 10 + (*last++ - '0');
     ND++;
+    W = std::min<size_t>(W, ND);
     size_t NW = (ND + 63) / 64;
     std::vector<DocRef> dr(ND);
 
@@ -177,7 +266,15 @@ int main(int ac, char** av) {
     bn[0] = dp;
     for (size_t i = 1; i < W; ++i) {
         const char* p = dp + df.s * i / W;
-        while (p < de && *(p - 1) != '\n') ++p;
+        while (p > dp && p < de && *(p - 1) != '\n') ++p;
+        while (p < de) {
+            const char* q = p;
+            uint32_t id = 0;
+            while (q < de && *q >= '0' && *q <= '9') id = id * 10 + (*q++ - '0');
+            if (!(id & 63)) break;
+            const char* nl = (const char*)memchr(p, '\n', de - p);
+            p = nl ? nl + 1 : de;
+        }
         bn[i] = p;
     }
 
@@ -187,8 +284,7 @@ int main(int ac, char** av) {
         const char* sc = bn[wid], * end = bn[wid + 1];
         auto& l_df = th_df[wid];
         std::vector<uint32_t> last_doc(NT, ~0u);
-        struct L1F { uint64_t hash = 0; uint32_t tid = ~0u; };
-        std::vector<L1F> l1(16384);
+        TokenCache cache;
 
         while (sc < end) {
             uint32_t id = 0;
@@ -201,29 +297,15 @@ int main(int ac, char** av) {
             sc = (nl < end) ? nl + 1 : end;
             dr[id] = {ts, len};
 
-            const char* tp = ts, * te = ts + len;
-            while (tp < te) {
-                while (tp < te && !CHAR_MAP[(uint8_t)*tp]) ++tp;
-                if (tp >= te) break;
-                const char* tok_st = tp;
-                while (tp < te && CHAR_MAP[(uint8_t)*tp]) ++tp;
-                size_t tl = size_t(tp - tok_st);
+            for_each_token(ts, ts + len, [&](const char* tok_st, size_t tl) {
                 if (tl <= 32) {
-                    uint64_t h64 = fast_hash_swar(tok_st, tl);
-                    uint32_t lidx = uint32_t(h64) & 16383;
-                    uint32_t tid;
-                    if (l1[lidx].hash == h64) {
-                        tid = l1[lidx].tid;
-                    } else {
-                        tid = dt.fn_fast(h64);
-                        l1[lidx] = {h64, tid};
-                    }
+                    uint32_t tid = cache.lookup(dt, dp, tok_st, tl);
                     if (tid != ~0u && last_doc[tid] != id) {
                         last_doc[tid] = id;
                         l_df[tid]++;
                     }
                 }
-            }
+                        });
         }
     });
 
@@ -265,41 +347,26 @@ int main(int ac, char** av) {
         const char* sc = bn[wid], * end = bn[wid + 1];
         auto& l_off = th_off[wid];
         std::vector<uint32_t> last_doc(NT, ~0u);
-        struct L1F { uint64_t hash = 0; uint32_t tid = ~0u; };
-        std::vector<L1F> l1(16384);
+        TokenCache cache;
 
         while (sc < end) {
             uint32_t id = 0;
             while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
             sc = dr[id].p + dr[id].l + 1;
-            const char* tp = dr[id].p, * te = tp + dr[id].l;
-            while (tp < te) {
-                while (tp < te && !CHAR_MAP[(uint8_t)*tp]) ++tp;
-                if (tp >= te) break;
-                const char* tok_st = tp;
-                while (tp < te && CHAR_MAP[(uint8_t)*tp]) ++tp;
-                size_t tl = size_t(tp - tok_st);
+            for_each_token(dr[id].p, dr[id].p + dr[id].l, [&](const char* tok_st, size_t tl) {
                 if (tl <= 32) {
-                    uint64_t h64 = fast_hash_swar(tok_st, tl);
-                    uint32_t lidx = uint32_t(h64) & 16383;
-                    uint32_t tid;
-                    if (l1[lidx].hash == h64) {
-                        tid = l1[lidx].tid;
-                    } else {
-                        tid = dt.fn_fast(h64);
-                        l1[lidx] = {h64, tid};
-                    }
+                    uint32_t tid = cache.lookup(dt, dp, tok_st, tl);
                     if (tid != ~0u && last_doc[tid] != id) {
                         last_doc[tid] = id;
                         uint32_t bs_id = bitset_map[tid];
                         if (bs_id != ~0u) {
-                            std::atomic_ref<uint64_t>(bitsets[bs_id][id >> 6]).fetch_or(1ULL << (id & 63), std::memory_order_relaxed);
+                            bitsets[bs_id][id >> 6] |= 1ULL << (id & 63);
                         } else {
                             all_postings[l_off[tid]++] = id;
                         }
                     }
                 }
-            }
+                        });
         }
     });
     std::vector<std::vector<uint32_t>>().swap(th_off);
@@ -447,14 +514,28 @@ int main(int ac, char** av) {
                     for (size_t w = 0; w < NW; ++w) {
                         uint64_t m = cb[w];
                         if (!m) continue;
-                        cnt += __builtin_popcountll(m);
-                        size_t base = w << 6;
-                        while (m) {
-                            int bit = __builtin_ctzll(m);
-                            uint32_t d = uint32_t(base + bit);
-                            isum += d;
-                            if (n10 < 10) f10[n10++] = d;
-                            m &= (m - 1);
+                        uint32_t bits = __builtin_popcountll(m);
+                        cnt += bits;
+                        uint64_t base = w << 6;
+                        if (bits <= 8) {
+                            while (m) {
+                                uint32_t d = uint32_t(base + __builtin_ctzll(m));
+                                isum += d;
+                                if (n10 < 10) f10[n10++] = d;
+                                m &= m - 1;
+                            }
+                        } else {
+                            isum += base * bits
+                                + __builtin_popcountll(m & 0xaaaaaaaaaaaaaaaaULL)
+                                + 2ULL * __builtin_popcountll(m & 0xccccccccccccccccULL)
+                                + 4ULL * __builtin_popcountll(m & 0xf0f0f0f0f0f0f0f0ULL)
+                                + 8ULL * __builtin_popcountll(m & 0xff00ff00ff00ff00ULL)
+                                + 16ULL * __builtin_popcountll(m & 0xffff0000ffff0000ULL)
+                                + 32ULL * __builtin_popcountll(m & 0xffffffff00000000ULL);
+                            while (m && n10 < 10) {
+                                f10[n10++] = uint32_t(base + __builtin_ctzll(m));
+                                m &= m - 1;
+                            }
                         }
                     }
                 } else {
