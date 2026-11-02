@@ -19,7 +19,7 @@
 static constexpr size_t G_SIZE = 262144;
 static constexpr uint32_t G_MASK = G_SIZE - 1;
 static constexpr size_t MAX_COUNTRIES = 242;
-static constexpr size_t BITSET_WORDS = 2048; // 131,072 distinct names max
+static constexpr size_t BITSET_WORDS = G_SIZE / 64; // 4096 words
 
 struct Agg {
     uint64_t count = 0;
@@ -33,6 +33,7 @@ alignas(64) static const char* g_name_ptr[G_SIZE];
 alignas(64) static uint32_t g_name_id[G_SIZE];
 static std::atomic<uint32_t> g_name_count{0};
 alignas(64) static std::atomic<uint32_t> g_name_len[G_SIZE];
+alignas(64) static std::atomic<uint64_t> g_country_bits[MAX_COUNTRIES][BITSET_WORDS];
 static uint8_t r2c[1000000];
 
 inline uint64_t hash_bytes(const char* p, size_t len) {
@@ -195,15 +196,11 @@ int main(int ac, char** av) {
     uint32_t empty_slot = get_name_slot("", 0, hash_bytes("", 0), arenas[0]);
     uint32_t empty_id = g_name_id[empty_slot];
     std::vector<std::vector<Agg>> sh(W, std::vector<Agg>(NC));
-    std::vector<std::vector<uint64_t>> worker_bits(W, std::vector<uint64_t>(NC * BITSET_WORDS, 0));
 
     auto worker = [&](size_t wid) {
         auto& ag = sh[wid];
-        uint64_t* my_bits = worker_bits[wid].data();
-        struct L1Entry { uint64_t hash = 0; const char* p = nullptr; uint32_t len = 0; uint32_t id = 0; };
-        L1Entry l1[8192]{};
-        constexpr uint32_t L1_MASK = 8191;
-
+        struct L1Entry { uint64_t hash = 0; const char* p = nullptr; uint32_t len = 0; uint32_t slot = 0; };
+        L1Entry l1[4096]{};
         const char* c = bn[wid];
         const char* end = bn[wid + 1];
         while (c < end) {
@@ -213,20 +210,29 @@ int main(int ac, char** av) {
             ++c; // ','
 
             uint32_t name_len = 0;
-            const char* name_start = "";
-            uint32_t raw_len = 0;
-            uint64_t nh = 0;
+            uint32_t nid = empty_id;
             if (*c == '"') {
                 ++c;
-                name_start = c;
+                const char* name_start = c;
                 uint32_t esc_cnt = 0;
                 while (true) {
                     const char* q = (const char*)memchr(c, '"', end - c);
                     if (q[1] == '"') { ++esc_cnt; c = q + 2; }
                     else { c = q; break; }
                 }
-                raw_len = uint32_t(c - name_start);
+                uint32_t raw_len = uint32_t(c - name_start);
                 name_len = raw_len - esc_cnt;
+                if (raw_len > 0) {
+                    uint64_t nh = hash_bytes(name_start, raw_len);
+                    uint32_t lidx = uint32_t(nh ^ (nh >> 12)) & 4095;
+                    if (l1[lidx].hash == nh && l1[lidx].len == raw_len && !memcmp(l1[lidx].p, name_start, raw_len)) {
+                        nid = l1[lidx].slot;
+                    } else {
+                        uint32_t slot = get_name_slot(name_start, raw_len, nh, arenas[wid]);
+                        nid = g_name_id[slot];
+                        l1[lidx] = {nh, g_name_ptr[slot], raw_len, nid};
+                    }
+                }
                 c += 2; // skip '"' and ','
             } else {
                 ++c; // empty unquoted name, skip ','
@@ -263,22 +269,12 @@ int main(int ac, char** av) {
             if (*c == '\r') ++c;
             if (*c == '\n') ++c;
 
-            uint32_t name_id = empty_id;
-            if (raw_len) {
-                nh = hash_bytes(name_start, raw_len);
-                uint32_t l1_idx = uint32_t(nh ^ (nh >> 16)) & L1_MASK;
-                if (l1[l1_idx].hash == nh && l1[l1_idx].len == raw_len && !memcmp(l1[l1_idx].p, name_start, raw_len)) {
-                    name_id = l1[l1_idx].id;
-                } else {
-                    uint32_t slot = get_name_slot(name_start, raw_len, nh, arenas[wid]);
-                    name_id = g_name_id[slot];
-                    l1[l1_idx] = {nh, g_name_ptr[slot], raw_len, name_id};
-                }
+            uint64_t mask = 1ULL << (nid & 63);
+            auto& word = g_country_bits[cid][nid >> 6];
+            uint64_t cur_val = word.load(std::memory_order_relaxed);
+            if (!(cur_val & mask)) {
+                word.fetch_or(mask, std::memory_order_relaxed);
             }
-
-            size_t bit_idx = (size_t)cid * BITSET_WORDS + (name_id >> 6);
-            my_bits[bit_idx] |= (1ULL << (name_id & 63));
-
             Agg& a = ag[cid];
             a.count++;
             a.id_sum += int64_t(id);
@@ -310,19 +306,6 @@ int main(int ac, char** av) {
         }
     }
 
-    size_t words = (g_name_count.load(std::memory_order_relaxed) + 63) / 64;
-    if (words > BITSET_WORDS) words = BITSET_WORDS;
-    for (size_t k = 0; k < NC; ++k) {
-        if (!ta[k].count) continue;
-        uint64_t* b0 = &worker_bits[0][k * BITSET_WORDS];
-        for (size_t w = 1; w < W; ++w) {
-            const uint64_t* bw = &worker_bits[w][k * BITSET_WORDS];
-            for (size_t i = 0; i < words; ++i) {
-                b0[i] |= bw[i];
-            }
-        }
-    }
-
     std::vector<uint8_t> sc;
     for (uint8_t k = 0; k < NC; ++k) if (ta[k].count) sc.push_back(k);
     std::sort(sc.begin(), sc.end(), [&](uint8_t a, uint8_t b) { return cnames[a] < cnames[b]; });
@@ -331,9 +314,8 @@ int main(int ac, char** av) {
     out.reserve(sc.size() * 120);
     for (uint8_t k : sc) {
         uint64_t nd = 0;
-        const uint64_t* b0 = &worker_bits[0][k * BITSET_WORDS];
-        for (size_t i = 0; i < words; ++i) {
-            nd += __builtin_popcountll(b0[i]);
+        for (size_t w = 0, words = (g_name_count.load(std::memory_order_relaxed) + 63) / 64; w < words; ++w) {
+            nd += __builtin_popcountll(g_country_bits[k][w].load(std::memory_order_relaxed));
         }
         char buf[256];
         const auto& a = ta[k];
