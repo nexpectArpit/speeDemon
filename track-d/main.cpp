@@ -4,9 +4,6 @@
 #include <charconv>
 #include <cstdint>
 #include <cstring>
-#if defined(__SSE2__)
-#include <immintrin.h>
-#endif
 #include <fcntl.h>
 #include <string>
 #include <sys/mman.h>
@@ -49,12 +46,7 @@ struct HP {
         return p;
     }
     void clear() {
-        size_t retained = 0;
-        for (auto& bucket : buckets) {
-            size_t bytes = bucket.capacity() * sizeof(Item);
-            if (retained + bytes > (size_t(2) << 20)) std::vector<Item>().swap(bucket);
-            else { retained += bytes; bucket.clear(); }
-        }
+        for (auto& bucket : buckets) bucket.clear();
         last = 0;
         count = 0;
     }
@@ -117,25 +109,6 @@ template<class F> void par(size_t W, F f) {
 
 inline uint32_t pu(const char*& p, const char* e) {
     uint32_t v = 0;
-#if defined(__SSE2__)
-    if (e - p >= 8 && p[4] >= '0' && p[4] <= '9') {
-        uint64_t word; memcpy(&word, p, 8);
-        __m128i bytes = _mm_cvtsi64_si128(static_cast<long long>(word));
-        unsigned mask = unsigned(_mm_movemask_epi8(_mm_and_si128(
-            _mm_cmpgt_epi8(bytes, _mm_set1_epi8('0' - 1)),
-            _mm_cmpgt_epi8(_mm_set1_epi8('9' + 1), bytes)))) & 255;
-        unsigned n = mask == 255 ? 8 : unsigned(__builtin_ctz((~mask) & 255));
-        if (n) {
-            uint64_t digits = word & 0x0f0f0f0f0f0f0f0fULL;
-            if (n < 8) digits &= (1ULL << (n * 8)) - 1;
-            digits <<= (8 - n) * 8;
-            digits = (digits * 10 + (digits >> 8)) & 0x00ff00ff00ff00ffULL;
-            digits = (digits * 100 + (digits >> 16)) & 0x0000ffff0000ffffULL;
-            v = uint32_t(digits * 10000 + (digits >> 32));
-            p += n;
-        }
-    }
-#endif
     while (p < e && *p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
     return v;
 }

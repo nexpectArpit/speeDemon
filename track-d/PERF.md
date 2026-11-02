@@ -70,3 +70,7 @@ User-supplied screenshot: 56.302points versus 57.248 on e6669a4, delta -0.946. R
 ## Decimal parsing and queue retention candidate — 2026-11-02
 
 On SSE2 x86 builds, classify up to eight bytes for long decimal fields and reduce their digit pairs/groups with integer arithmetic; continue scalar parsing for additional digits and bounded tails. Other targets retain scalar parsing. Keep full uint32 edge values and64-bit distances. At query clear, retain at most2MiB of vector capacity per radix frontier and release excess bucket ownership; active searches can still exceed that amount and allocator RSS release is implementation-dependent. Shared CSR construction atomics and distance-table reset policy remain. This targets loading instruction cost and cumulative queue high-water retention. No local build/test/benchmark was run; score impact is pending.
+
+## Restore prior measured best source — 2026-11-02
+
+The D implementation on65015f5 scored56.585170 points (366.292ms,212,185,088bytes,S380). Restored `main.cpp` fromfe691810, previously scored57.336883 points (358.589ms,201,469,952bytes,S347). The previous version is faster, smaller and shorter in that recorded run; its approximate log-loss versus65015f5 is `(56.585170-57.336883)*ln(10)/50=-0.0346`. Timing variation is material, so the board must confirm the restore. No local test was run.
