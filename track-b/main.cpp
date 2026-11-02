@@ -368,6 +368,13 @@ int main(int ac, char** av) {
             }
         }
     });
+    for (auto& block : blocks) if (!block.bitmap() && block.data &&
+        block.capacity >= 16 && uint64_t(block.count) * 4 <= uint64_t(block.capacity) * 3) {
+        if (void* p = realloc(block.data, size_t(block.count) * sizeof(uint16_t))) {
+            block.data = p;
+            block.capacity = block.count;
+        }
+    }
     std::vector<uint32_t> df_cnt(NT);
     for (size_t b = 0; b < NB; ++b)
         for (size_t t = 0; t < NT; ++t) df_cnt[t] += blocks[b * NT + t].count;

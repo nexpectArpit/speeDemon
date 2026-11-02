@@ -102,3 +102,9 @@ Commitb48c450 passed gates but B scored53.898406 points at801.887ms/68,861,952by
 ## One-tokenization adaptive block builder — 2026-11-02
 
 Replaced the two tokenization/index passes with a newline/document-reference pass followed by one worker-owned pass that builds final32,768-document sparse blocks and promotes dense term blocks directly to bitmaps. It removes the per-thread term/block count matrix and second tokenization/hash pass. Dynamic sparse capacities and per-block metadata may increase memory; promotion and allocation overhead may erase the scan savings. Retained exact term identity, single-writer block ownership, exact Boolean execution, bounded grouped phrase verification and fallback. This candidate derives from the preserved97dc81f implementation; it has no prior scorer measurement. No local build/test was run; correctness and K await the board.
+
+## Scorer evidence: one-pass builder — 2026-11-02
+
+Commit78e119d passed correctness and scored54.379226 points at674.690ms/98,476,032bytes/S819. Against the preceding e0a9c40 result (53.562755,835.326ms/68,124,672bytes/S844), time improved materially and memory/source fell relative to the historical one-pass prototype, but peak memory rose by30.35MB. This comparison includes run variance; it does not beat the best observed grouped two-pass result54.816360.
+
+To reclaim allocator slack, shrink sparse block buffers after construction when capacity is at least16 entries and at least25% above the live posting count. This preserves contents and bitmap representation. The extra walk/realloc time and actual RSS reduction are unmeasured; next scorer result decides acceptance.
