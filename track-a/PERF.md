@@ -69,3 +69,7 @@ The evaluated compact-record revision in commit1393442 scored75.538016 points (4
 ## SSE2 latency decimal parsing candidate — 2026-11-02
 
 The prior A source still converts every latency with a scalar multiply/add loop. Added a bounded SSE2 SWAR path for runs of at least five digits, with the scalar tail preserving exact uint32 values including UINT32_MAX. This should help long latency strings; short values remain scalar. Current board run for the unchanged source was72.527 points at53.167ms/30,892,032bytes/S318, while the recorded best is75.720. That timing spread is too large to attribute to code; the parser candidate is evaluated separately in the batch. No local test was run.
+
+## Reject latency parser candidate — 2026-11-02
+
+Commit91d9770 scored75.308117 points at40.730ms/30,019,584bytes/S342, versus75.434047 at41.095ms/30,117,888bytes/S318 on the same restored source without the added parser. The modest measured time and memory gains did not repay24 added formatted lines. Reverted the parser; no local test was run.

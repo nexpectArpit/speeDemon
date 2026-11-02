@@ -85,3 +85,7 @@ Parse row IDs, region IDs and the integer part of the amount with an SSE2 SWAR p
 ## Reject SIMD numeric parser candidate — 2026-11-02
 
 Commit e6699b3 scored67.388228 points at65.280ms/17,661,952bytes/S419, versus67.465437 at65.303ms/18,051,072bytes/S397 on65015f5. Time was effectively unchanged, memory fell slightly, but the extra22 formatted lines lowered points by0.077. Reverted the numeric parser and kept the simpler exact parser. Approximate loss is `L=(67.465437-67.388228)*ln(10)/50=+0.00356`.
+
+## 8,192-entry exact local name cache candidate — 2026-11-02
+
+Expanded each worker's direct-mapped exact name cache from4,096 to8,192 entries, updating the mask consistently. Cache keys still require hash, length and raw-byte equality; misses retain the shared exact dictionary and release/acquire publication. The additional cache storage is about96KiB per worker. This targets repeated names that conflict in the smaller cache; scorer time, RSS and K are pending. No local test was run.

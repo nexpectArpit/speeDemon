@@ -46,12 +46,7 @@ struct HP {
         return p;
     }
     void clear() {
-        size_t retained = 0;
-        for (auto& bucket : buckets) {
-            size_t bytes = bucket.capacity() * sizeof(Item);
-            if (retained + bytes > (size_t(512) << 10)) std::vector<Item>().swap(bucket);
-            else { retained += bytes; bucket.clear(); }
-        }
+        for (auto& bucket : buckets) bucket.clear();
         last = 0;
         count = 0;
     }

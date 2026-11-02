@@ -200,7 +200,7 @@ int main(int ac, char** av) {
     auto worker = [&](size_t wid) {
         auto& ag = sh[wid];
         struct L1Entry { uint64_t hash = 0; const char* p = nullptr; uint32_t len = 0; uint32_t slot = 0; };
-        L1Entry l1[4096]{};
+        L1Entry l1[8192]{};
         const char* c = bn[wid];
         const char* end = bn[wid + 1];
         while (c < end) {
@@ -224,7 +224,7 @@ int main(int ac, char** av) {
                 name_len = raw_len - esc_cnt;
                 if (raw_len > 0) {
                     uint64_t nh = hash_bytes(name_start, raw_len);
-                    uint32_t lidx = uint32_t(nh ^ (nh >> 12)) & 4095;
+                    uint32_t lidx = uint32_t(nh ^ (nh >> 12)) & 8191;
                     if (l1[lidx].hash == nh && l1[lidx].len == raw_len && !memcmp(l1[lidx].p, name_start, raw_len)) {
                         nid = l1[lidx].slot;
                     } else {

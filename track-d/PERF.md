@@ -78,3 +78,7 @@ The D implementation on65015f5 scored56.585170 points (366.292ms,212,185,088byte
 ## Lower radix-heap retention cap candidate — 2026-11-02
 
 Added a512KiB retained vector-capacity budget per heap after each query. With two heaps per worker, this caps retained queue buffers at12MiB across12 workers, subject to actual bucket distribution. This can lower peak memory but may increase allocations on later large queries. The e6699b3 run of the unchanged D source was55.775527 points at418.512ms/196,141,056bytes/S347; the earlier same-family runs varied widely, so this is a new measured candidate, not a claim of benefit. No local test was run.
+
+## Reject heap retention cap — 2026-11-02
+
+Commit91d9770 passed but scored57.133942 at355.919ms/211,443,712bytes/S355. The earlier uncapped source scored57.336883 at358.589ms/201,469,952bytes/S347. The cap run was faster but used about10MB more memory and added8 lines; points fell by0.203. Restored the uncapped measured-best source. Approximate log loss is `L=(57.336883-57.133942)*ln(10)/50=+0.00935`.
