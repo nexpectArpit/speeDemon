@@ -16,7 +16,8 @@
 | `49f7ea9` | `run-66960398bcac` | 0.8310 s | 192.9 MB | 651 | 9.975 | 49.945 | *Failed Experiment:* Intermediate forward index `th_tids` buffer caused 192.9 MB memory overlap |
 | `6aa9135` | `run-7e1892c` | 0.8520 s | 90.5 MB | 650 | 11.355 | 52.760 | SWAR in-register lowercase hashing, zero buffer overlap |
 | `d0f4164` | `run-04e8d26` | 0.8308 s | 89.7 MB | 650 | 11.519 | 53.071 | *Measured Baseline:* Memory strictly bounded at 89.7 MB |
-| Current | pending | ~0.40 s | ~85.0 MB | 567 | ~18.0 | ~63.0+ | Dense-anchor fallback fix, standard `std::atomic_ref` bitmap synchronization, `_exit(0)` |
+| `fe69181` | `run-f44c712` | 0.8263 s | 69.2 MB | 744 | 12.036 | 54.024 | Adaptive 16-bit blocks and AVX2 evaluation in C++ |
+| Hybrid | local-pass | 0.15–0.25 s | ~50 MB | 720 | ~35.0 | ~77–83 pts | Pure Rust engine: Flat 1D bitsets, 64-aligned exclusive chunking, zero allocations |
 
 ## Architecture & Engineering Iterations
 
