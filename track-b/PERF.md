@@ -94,3 +94,7 @@ Diagnosis from code review: workers claimed individual candidate indices and the
 ## Rarest-token phrase verification candidate — 2026-11-02
 
 For grouped phrase checks, select the term with lowest indexed document frequency as the anchor. Scan token boundaries for that term and verify only the adjacent phrase window around matching positions. This preserves exact token-by-token matching and uses the same frequencies already used for candidate intersection. It changes no candidate generation or fallback path. Expected benefit is fewer full phrase comparisons, especially when the rare term is not first; scorer T/K are pending. No local test was run.
+
+## Scorer rejection: rare-term phrase anchor — 2026-11-02
+
+Commitb48c450 passed gates but B scored53.898406 points at801.887ms/68,861,952bytes/S860, versus54.816360 at738.064ms/69,558,272bytes/S844 on e45d853. Loss relative to the preceding result: `L=(54.816360-53.898406)*ln(10)/50=+0.0423`. Reverted the anchor-selection change and retained the bounded grouped verifier with exact fallback. The small memory decrease did not compensate for the measured time/source regression. This is a one-run comparison and not a variance-controlled microbenchmark.

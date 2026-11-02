@@ -419,11 +419,6 @@ int main(int ac, char** av) {
     };
     size_t NQ = qs.size();
     std::vector<std::string> res(NQ);
-    std::vector<uint32_t> phrase_anchor(NQ);
-    for (size_t q = 0; q < NQ; ++q) if (qs[q].ph) {
-        for (uint32_t i = 1; i < qs[q].t.size(); ++i)
-            if (df_cnt[qs[q].t[i]] < df_cnt[qs[q].t[phrase_anchor[q]]]) phrase_anchor[q] = i;
-    }
     constexpr size_t CANDIDATE_LIMIT = 1u << 18;
     std::atomic<size_t> candidate_count{0};
     std::vector<std::vector<uint64_t>> phrase_candidates(W), phrase_hits(W);
@@ -612,17 +607,12 @@ int main(int ac, char** av) {
                 for (size_t k = i; k < j; ++k) {
                     uint32_t q = uint32_t(candidates[k]);
                     const auto& rw = qs[q].rw;
-                    uint32_t anchor = phrase_anchor[q];
-                    if (rw.size() > words.size() || anchor >= words.size()) continue;
-                    for (size_t pos = anchor; pos + rw.size() - anchor <= words.size(); ++pos) {
-                        if (words[pos].second != rw[anchor].size() ||
-                            !same_word(words[pos].first, rw[anchor].data(), rw[anchor].size())) continue;
-                        size_t start = pos - anchor, z = 0;
-                        for (; z < rw.size(); ++z) {
-                            if (z == anchor) continue;
+                    if (rw.size() > words.size()) continue;
+                    for (size_t start = 0; start + rw.size() <= words.size(); ++start) {
+                        size_t z = 0;
+                        for (; z < rw.size(); ++z)
                             if (words[start + z].second != rw[z].size() ||
                                 !same_word(words[start + z].first, rw[z].data(), rw[z].size())) break;
-                        }
                         if (z == rw.size()) { hits.push_back((uint64_t(q) << 32) | doc); break; }
                     }
                 }
