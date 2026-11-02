@@ -61,3 +61,7 @@ Publish completed hour buffers and flush the consecutive completed prefix throug
 ## Adaptive four-byte record candidate — 2026-11-02
 
 Encode common records in four bytes:20latency bits,11endpoint-ID bits and one error bit. Reserve the latency marker and store every larger/equal value exactly in an ordered overflow stream, preserving UINT32_MAX. If overflow payload exceeds the six-byte representation after256records, expand that worker/hour buffer into the prior wide format and release compact buffers. Histogram scans decode keys only; scatter decodes full latencies and retires buffers. This targets intermediate storage and bandwidth, not the percentile definition. Spare vector capacity, overflow distribution, decode cost and formatted S can offset the payload gain. No local build/test/benchmark was run under the standing scorer-driven instruction; score impact is pending.
+
+## Restore last measured best source — 2026-11-02
+
+The evaluated compact-record revision in commit1393442 scored75.538016 points (42.563ms,23,994,368bytes,S371). Restored `main.cpp` from55a8300, whose board result was75.720077 points (39.916ms,30,326,784bytes,S318). The measured source-size and time gains outweighed its higher memory in the official score. Relative to1393442, the points delta is+0.182042 and the approximate log-loss change is `L=ln(K_old/K_new)=-0.00839`; board run variance means the next evaluation must confirm it. Source restore only; no local test was run. This is the prior measured best, not a new optimization claim.

@@ -83,48 +83,6 @@ struct __attribute__((packed)) Rec {
 };
 static_assert(sizeof(Rec) == 6 && MAX_EP < 0x8000);
 
-struct RecordBuffer {
-    static constexpr uint32_t MASK = (1u << 20) - 1;
-    std::vector<uint32_t> packed, overflow;
-    std::vector<Rec> wide;
-    bool expanded = false;
-    void push_back(Rec r) {
-        if (expanded) { wide.push_back(r); return; }
-        uint32_t value = r.lat < MASK ? r.lat : MASK;
-        packed.push_back(value | (uint32_t(r.ep_err & 2047) << 20) | (uint32_t(r.ep_err >> 15) << 31));
-        if (r.lat >= MASK) overflow.push_back(r.lat);
-        if (packed.size() >= 256 && overflow.size() * 2 > packed.size()) {
-            wide.reserve(packed.size());
-            each([&](uint32_t lat, uint16_t key) { wide.push_back({lat, key}); });
-            std::vector<uint32_t>().swap(packed);
-            std::vector<uint32_t>().swap(overflow);
-            expanded = true;
-        }
-    }
-    template<class F> void keys(F f) const {
-        if (expanded) { for (const auto& r : wide) f(r.ep_err); }
-        else for (uint32_t p : packed) f(uint16_t(((p >> 20) & 2047) | ((p >> 31) << 15)));
-    }
-    template<class F> void each(F f) const {
-        if (expanded) { for (const auto& r : wide) f(r.lat, r.ep_err); }
-        else {
-            size_t next = 0;
-            for (uint32_t p : packed) {
-                uint32_t lat = p & MASK;
-                if (lat == MASK) lat = overflow[next++];
-                f(lat, uint16_t(((p >> 20) & 2047) | ((p >> 31) << 15)));
-            }
-        }
-    }
-    void release() {
-        std::vector<uint32_t>().swap(packed);
-        std::vector<uint32_t>().swap(overflow);
-        std::vector<Rec>().swap(wide);
-    }
-};
-static_assert(MAX_EP <= 2048);
-
-
 int main(int ac, char** av) {
     const char* dd = ac == 3 ? av[1] : "/data", *od = ac == 3 ? av[2] : "/out";
     int fd = open((std::string(dd) + "/requests.log").c_str(), O_RDONLY);
@@ -147,7 +105,7 @@ int main(int ac, char** av) {
         bn[i] = p;
     }
 
-    std::vector<std::array<RecordBuffer, H>> th_recs(W);
+    std::vector<std::array<std::vector<Rec>, H>> th_recs(W);
     std::vector<std::thread> th;
 
     auto parse_worker = [&](size_t w) {
@@ -210,17 +168,19 @@ int main(int ac, char** av) {
             for (size_t h = hc.fetch_add(1); h < H; h = hc.fetch_add(1)) {
                 std::vector<uint32_t> counts(num_ep), errors(num_ep), starts(num_ep + 1);
                 for (size_t w = 0; w < W; ++w) {
-                    th_recs[w][h].keys([&](uint16_t key) {
-                        uint16_t id = key & 0x7fff;
-                        ++counts[id]; errors[id] += key >> 15;
-                    });
+                    for (const auto& rec : th_recs[w][h]) {
+                        uint16_t id = rec.ep_err & 0x7fff;
+                        ++counts[id];
+                        errors[id] += rec.ep_err >> 15;
+                    }
                 }
                 for (size_t i = 0; i < num_ep; ++i) starts[i + 1] = starts[i] + counts[i];
                 std::unique_ptr<uint32_t[]> latencies(new uint32_t[starts.back()]);
                 std::vector<uint32_t> positions = starts;
                 for (size_t w = 0; w < W; ++w) {
-                    th_recs[w][h].each([&](uint32_t lat, uint16_t key) { latencies[positions[key & 0x7fff]++] = lat; });
-                    th_recs[w][h].release();
+                    for (const auto& rec : th_recs[w][h])
+                        latencies[positions[rec.ep_err & 0x7fff]++] = rec.lat;
+                    std::vector<Rec>().swap(th_recs[w][h]);
                 }
                 auto& buf = ob[h]; buf.reserve(num_ep * 85); char b[32];
                 for (uint16_t s_id = 0; s_id < num_ep; ++s_id) {
