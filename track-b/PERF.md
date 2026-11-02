@@ -108,3 +108,9 @@ Replaced the two tokenization/index passes with a newline/document-reference pas
 Commit78e119d passed correctness and scored54.379226 points at674.690ms/98,476,032bytes/S819. Against the preceding e0a9c40 result (53.562755,835.326ms/68,124,672bytes/S844), time improved materially and memory/source fell relative to the historical one-pass prototype, but peak memory rose by30.35MB. This comparison includes run variance; it does not beat the best observed grouped two-pass result54.816360.
 
 To reclaim allocator slack, shrink sparse block buffers after construction when capacity is at least16 entries and at least25% above the live posting count. This preserves contents and bitmap representation. The extra walk/realloc time and actual RSS reduction are unmeasured; next scorer result decides acceptance.
+
+## Reject sparse-buffer shrink and one-pass builder — 2026-11-02
+
+Commit514a992 passed correctness but scored54.088370 at690.694ms/98,492,416bytes/S828, versus54.379226 at674.690ms/98,476,032bytes/S819 on78e119d. Peak memory was unchanged, so the realloc pass failed its target and its added time/source cost reduced points. Reverting it.
+
+The one-pass builder itself is also not the current choice: its best observed54.379226 is below the bounded grouped two-pass score54.816360 on e45d853, despite a faster single run, because memory was about98.5MB versus69.6MB. Restore the grouped two-pass implementation. These are single-run scorer comparisons with known timing variance; the selection favors the highest observed K and lower memory, not a claim of stable timing.
