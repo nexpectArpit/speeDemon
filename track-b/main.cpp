@@ -178,6 +178,26 @@ template<class F> inline void for_each_token(const char* p, const char* end, F c
 
 enum class Op : uint8_t { AND, OR, NOT };
 
+template<Op O> inline void apply_words(uint64_t* out, const uint64_t* rhs, size_t words) {
+    size_t i = 0;
+#if defined(__AVX2__)
+    for (; i + 4 <= words; i += 4) {
+        __m256i a = _mm256_loadu_si256((const __m256i*)(out + i));
+        __m256i b = _mm256_loadu_si256((const __m256i*)(rhs + i));
+        __m256i r;
+        if constexpr (O == Op::AND) r = _mm256_and_si256(a, b);
+        else if constexpr (O == Op::OR) r = _mm256_or_si256(a, b);
+        else r = _mm256_andnot_si256(b, a);
+        _mm256_storeu_si256((__m256i*)(out + i), r);
+    }
+#endif
+    for (; i < words; ++i) {
+        if constexpr (O == Op::AND) out[i] &= rhs[i];
+        else if constexpr (O == Op::OR) out[i] |= rhs[i];
+        else out[i] &= ~rhs[i];
+    }
+}
+
 struct QItem {
     bool ph = false;
     std::vector<uint32_t> t;
@@ -278,14 +298,29 @@ int main(int ac, char** av) {
         bn[i] = p;
     }
 
-    std::vector<std::vector<uint32_t>> th_df(W, std::vector<uint32_t>(NT, 0));
-
+    static constexpr uint32_t BLOCK_SHIFT = 16, DENSE = 4096;
+    size_t NB = (size_t(ND) + 65535) >> BLOCK_SHIFT;
+    struct PostingBlock { uint32_t offset = 0, count = 0; };
+    std::vector<PostingBlock> blocks(NT * NB);
+    std::vector<uint32_t> first_block(W), span(W);
+    std::vector<std::vector<uint32_t>> offsets(W);
+    auto first_doc = [&](const char* p) {
+        if (p == de) return ND;
+        uint32_t id = 0;
+        while (p < de && *p >= '0' && *p <= '9') id = id * 10 + (*p++ - '0');
+        return id;
+    };
+    for (size_t w = 0; w < W; ++w) {
+        uint32_t first = first_doc(bn[w]), last = first_doc(bn[w + 1]);
+        first_block[w] = first >> BLOCK_SHIFT;
+        span[w] = last > first ? ((last - 1) >> BLOCK_SHIFT) - first_block[w] + 1 : 0;
+        offsets[w].resize(NT * span[w]);
+    }
     par(W, [&](size_t wid) {
-        const char* sc = bn[wid], * end = bn[wid + 1];
-        auto& l_df = th_df[wid];
+        const char* sc = bn[wid], *end = bn[wid + 1];
+        auto& counts = offsets[wid];
         std::vector<uint32_t> last_doc(NT, ~0u);
         TokenCache cache;
-
         while (sc < end) {
             uint32_t id = 0;
             while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
@@ -293,369 +328,256 @@ int main(int ac, char** av) {
             const char* ts = sc;
             const char* nl = (const char*)memchr(sc, '\n', end - sc);
             if (!nl) nl = end;
-            uint32_t len = uint32_t(nl - ts);
-            sc = (nl < end) ? nl + 1 : end;
-            dr[id] = {ts, len};
-
-            for_each_token(ts, ts + len, [&](const char* tok_st, size_t tl) {
-                if (tl <= 32) {
-                    uint32_t tid = cache.lookup(dt, dp, tok_st, tl);
-                    if (tid != ~0u && last_doc[tid] != id) {
-                        last_doc[tid] = id;
-                        l_df[tid]++;
-                    }
+            dr[id] = {ts, uint32_t(nl - ts)};
+            sc = nl < end ? nl + 1 : end;
+            size_t base = size_t((id >> BLOCK_SHIFT) - first_block[wid]) * NT;
+            for_each_token(ts, nl, [&](const char* token, size_t length) {
+                if (length > 32) return;
+                uint32_t tid = cache.lookup(dt, dp, token, length);
+                if (tid != ~0u && last_doc[tid] != id) {
+                    last_doc[tid] = id;
+                    ++counts[base + tid];
                 }
-                        });
+            });
         }
     });
-
-    std::vector<uint32_t> df_cnt(NT, 0);
-    for (size_t t = 0; t < NT; ++t) {
-        uint32_t sum = 0;
-        for (size_t w = 0; w < W; ++w) sum += th_df[w][t];
-        df_cnt[t] = sum;
-    }
-
-    static constexpr uint32_t BITSET_THRESH = 5000;
-    std::vector<uint32_t> bitset_map(NT, ~0u);
-    uint32_t num_bitsets = 0;
-    for (size_t t = 0; t < NT; ++t) {
-        if (df_cnt[t] >= BITSET_THRESH) bitset_map[t] = num_bitsets++;
-    }
-
-    std::vector<std::vector<uint64_t>> bitsets(num_bitsets, std::vector<uint64_t>(NW, 0));
-    std::vector<std::vector<uint32_t>> th_off(W, std::vector<uint32_t>(NT, 0));
-    std::vector<uint32_t> pos_off(NT + 1, 0);
-    for (size_t t = 0; t < NT; ++t) {
-        if (bitset_map[t] == ~0u) {
-            uint32_t sum = 0;
+    std::vector<uint32_t> df_cnt(NT);
+    uint32_t sparse_size = 0, dense_size = 0;
+    for (size_t b = 0; b < NB; ++b) {
+        uint32_t words = uint32_t(std::min<size_t>(1024, NW - b * 1024));
+        for (size_t t = 0; t < NT; ++t) {
+            auto& block = blocks[t * NB + b];
+            for (size_t w = 0; w < W; ++w)
+                if (b >= first_block[w] && b - first_block[w] < span[w])
+                    block.count += offsets[w][(b - first_block[w]) * NT + t];
+            df_cnt[t] += block.count;
+            block.offset = block.count >= DENSE ? dense_size : sparse_size;
+            if (block.count >= DENSE) dense_size += words;
+            else sparse_size += block.count;
+            uint32_t cursor = block.offset;
             for (size_t w = 0; w < W; ++w) {
-                th_off[w][t] = pos_off[t] + sum;
-                sum += th_df[w][t];
+                if (b < first_block[w] || b - first_block[w] >= span[w]) continue;
+                auto& count = offsets[w][(b - first_block[w]) * NT + t];
+                uint32_t old = count;
+                count = cursor;
+                if (block.count < DENSE) cursor += old;
             }
-            pos_off[t + 1] = pos_off[t] + sum;
-        } else {
-            pos_off[t + 1] = pos_off[t];
         }
     }
-    std::vector<std::vector<uint32_t>>().swap(th_df);
-
-    uint32_t total_array_postings = pos_off[NT];
-    std::vector<uint32_t> all_postings(total_array_postings);
-
+    std::vector<uint16_t> sparse(sparse_size);
+    std::vector<uint64_t> dense(dense_size);
     par(W, [&](size_t wid) {
-        const char* sc = bn[wid], * end = bn[wid + 1];
-        auto& l_off = th_off[wid];
+        const char* sc = bn[wid], *end = bn[wid + 1];
+        auto& cursor = offsets[wid];
         std::vector<uint32_t> last_doc(NT, ~0u);
         TokenCache cache;
-
         while (sc < end) {
             uint32_t id = 0;
             while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
-            sc = dr[id].p + dr[id].l + 1;
-            for_each_token(dr[id].p, dr[id].p + dr[id].l, [&](const char* tok_st, size_t tl) {
-                if (tl <= 32) {
-                    uint32_t tid = cache.lookup(dt, dp, tok_st, tl);
-                    if (tid != ~0u && last_doc[tid] != id) {
-                        last_doc[tid] = id;
-                        uint32_t bs_id = bitset_map[tid];
-                        if (bs_id != ~0u) {
-                            bitsets[bs_id][id >> 6] |= 1ULL << (id & 63);
-                        } else {
-                            all_postings[l_off[tid]++] = id;
-                        }
-                    }
-                }
-                        });
+            const auto& doc = dr[id];
+            sc = doc.p + doc.l;
+            if (sc < end) ++sc;
+            uint32_t b = id >> BLOCK_SHIFT;
+            size_t base = size_t(b - first_block[wid]) * NT;
+            for_each_token(doc.p, doc.p + doc.l, [&](const char* token, size_t length) {
+                if (length > 32) return;
+                uint32_t tid = cache.lookup(dt, dp, token, length);
+                if (tid == ~0u || last_doc[tid] == id) return;
+                last_doc[tid] = id;
+                const auto& block = blocks[size_t(tid) * NB + b];
+                if (block.count >= DENSE) dense[block.offset + ((id & 65535) >> 6)] |= 1ULL << (id & 63);
+                else sparse[cursor[base + tid]++] = uint16_t(id);
+            });
         }
     });
-    std::vector<std::vector<uint32_t>>().swap(th_off);
-
-    auto get_pos = [&](uint32_t t) -> std::pair<const uint32_t*, size_t> {
-        return {all_postings.data() + pos_off[t], df_cnt[t]};
+    std::vector<std::vector<uint32_t>>().swap(offsets);
+    const PostingBlock empty{};
+    uint16_t zero = 0;
+    const uint16_t* sparse_base = sparse.empty() ? &zero : sparse.data();
+    auto get_block = [&](uint32_t term, size_t b) -> const PostingBlock& {
+        return term == ~0u ? empty : blocks[size_t(term) * NB + b];
     };
-
+    auto phrase_matches = [&](uint32_t doc, const QItem& query) {
+        const auto& words = query.rw;
+        const char* p = dr[doc].p, *end = p + dr[doc].l;
+        while (p < end) {
+            while (p < end && !CHAR_MAP[uint8_t(*p)]) ++p;
+            const char* word = p;
+            while (p < end && CHAR_MAP[uint8_t(*p)]) ++p;
+            if (size_t(p - word) != words[0].size() || !same_word(word, words[0].data(), words[0].size())) continue;
+            const char* next = p;
+            size_t i = 1;
+            for (; i < words.size(); ++i) {
+                while (next < end && !CHAR_MAP[uint8_t(*next)]) ++next;
+                word = next;
+                while (next < end && CHAR_MAP[uint8_t(*next)]) ++next;
+                if (size_t(next - word) != words[i].size() || !same_word(word, words[i].data(), words[i].size())) break;
+            }
+            if (i == words.size()) return true;
+        }
+        return false;
+    };
     size_t NQ = qs.size();
     std::vector<std::string> res(NQ);
     std::atomic<size_t> qc{0};
-
     par(W, [&](size_t) {
-        std::vector<uint64_t> cb(NW, 0);
-        std::vector<uint32_t> cur, nxt;
-        cur.reserve(65536); nxt.reserve(65536);
-        char b[32];
-
-        auto fmt_res = [&](std::string& rs, uint32_t cnt, uint64_t isum, const uint32_t* f10, uint32_t n10) {
-            rs.append(b, std::to_chars(b, b + 32, cnt).ptr);
-            rs += ' ';
-            rs.append(b, std::to_chars(b, b + 32, isum).ptr);
-            for (uint32_t i = 0; i < n10; ++i) {
-                rs += ' ';
-                rs.append(b, std::to_chars(b, b + 32, f10[i]).ptr);
-            }
-        };
-
+        std::vector<uint64_t> cb(1024);
+        std::vector<uint16_t> cur, nxt;
+        cur.reserve(DENSE); nxt.reserve(DENSE);
         for (size_t q = qc.fetch_add(1); q < NQ; q = qc.fetch_add(1)) {
-            auto& it = qs[q];
-            auto& rs = res[q];
-
-            if (!it.ph) {
-                bool in_bitset = false;
+            const auto& query = qs[q];
+            uint32_t count = 0, first[10], nfirst = 0;
+            uint64_t sum = 0;
+            auto add = [&](uint32_t doc) { ++count; sum += doc; if (nfirst < 10) first[nfirst++] = doc; };
+            auto summarize = [&](uint64_t mask, uint32_t base) {
+                unsigned bits = __builtin_popcountll(mask);
+                if (bits <= 8) {
+                    while (mask) { add(base + __builtin_ctzll(mask)); mask &= mask - 1; }
+                    return;
+                }
+                count += bits;
+                sum += uint64_t(base) * bits
+                    + __builtin_popcountll(mask & 0xaaaaaaaaaaaaaaaaULL)
+                    + 2ULL * __builtin_popcountll(mask & 0xccccccccccccccccULL)
+                    + 4ULL * __builtin_popcountll(mask & 0xf0f0f0f0f0f0f0f0ULL)
+                    + 8ULL * __builtin_popcountll(mask & 0xff00ff00ff00ff00ULL)
+                    + 16ULL * __builtin_popcountll(mask & 0xffff0000ffff0000ULL)
+                    + 32ULL * __builtin_popcountll(mask & 0xffffffff00000000ULL);
+                while (mask && nfirst < 10) { first[nfirst++] = base + __builtin_ctzll(mask); mask &= mask - 1; }
+            };
+            std::array<size_t, 16> order{};
+            bool absent = false;
+            if (query.ph) {
+                for (size_t i = 0; i < query.t.size(); ++i) {
+                    order[i] = i;
+                    if (query.t[i] == ~0u || !df_cnt[query.t[i]]) absent = true;
+                }
+                if (!absent) std::sort(order.begin(), order.begin() + query.t.size(), [&](size_t a, size_t b) { return df_cnt[query.t[a]] < df_cnt[query.t[b]]; });
+            }
+            for (size_t b = 0; b < NB && !absent; ++b) {
+                uint32_t base = uint32_t(b << BLOCK_SHIFT);
+                size_t words = std::min<size_t>(1024, NW - b * 1024);
+                const auto& initial = get_block(query.t[query.ph ? order[0] : 0], b);
+                bool bitmap = initial.count >= DENSE;
                 cur.clear();
-                uint32_t t0 = it.t[0];
-                if (t0 != ~0u && df_cnt[t0] > 0) {
-                    uint32_t bs0 = bitset_map[t0];
-                    if (bs0 != ~0u) {
-                        in_bitset = true;
-                        std::memcpy(cb.data(), bitsets[bs0].data(), NW * sizeof(uint64_t));
-                    } else {
-                        auto [p, sz] = get_pos(t0);
-                        if (sz > 16384 && !it.op.empty()) {
-                            in_bitset = true;
-                            std::fill(cb.begin(), cb.end(), 0);
-                            for (size_t i = 0; i < sz; ++i) cb[p[i] >> 6] |= (1ULL << (p[i] & 63));
-                        } else {
-                            cur.assign(p, p + sz);
+                if (bitmap) std::memcpy(cb.data(), dense.data() + initial.offset, words * 8);
+                else if (initial.count) cur.assign(sparse_base + initial.offset, sparse_base + initial.offset + initial.count);
+                if (query.ph) {
+                    if (bitmap) {
+                        for (size_t w = 0; w < words; ++w) {
+                            uint64_t m = cb[w];
+                            while (m) { cur.push_back(uint16_t(w * 64 + __builtin_ctzll(m))); m &= m - 1; }
                         }
                     }
-                }
-
-                for (size_t i = 0; i < it.op.size(); ++i) {
-                    Op o = it.op[i];
-                    uint32_t ti = it.t[i + 1];
-                    uint32_t bsi = (ti != ~0u) ? bitset_map[ti] : ~0u;
-
-                    if (bsi != ~0u) {
-                        const uint64_t* tb = bitsets[bsi].data();
-                        if (!in_bitset) {
-                            if (o == Op::OR) {
-                                in_bitset = true;
-                                std::memcpy(cb.data(), tb, NW * sizeof(uint64_t));
-                                for (uint32_t d : cur) cb[d >> 6] |= (1ULL << (d & 63));
-                            } else if (o == Op::AND) {
-                                size_t out_sz = 0;
-                                for (uint32_t d : cur) {
-                                    if (tb[d >> 6] & (1ULL << (d & 63))) cur[out_sz++] = d;
-                                }
-                                cur.resize(out_sz);
-                            } else {
-                                size_t out_sz = 0;
-                                for (uint32_t d : cur) {
-                                    if (!(tb[d >> 6] & (1ULL << (d & 63)))) cur[out_sz++] = d;
-                                }
-                                cur.resize(out_sz);
-                            }
+                    for (size_t i = 1; i < query.t.size() && !cur.empty(); ++i) {
+                        const auto& operand = get_block(query.t[order[i]], b);
+                        if (!operand.count) { cur.clear(); break; }
+                        size_t out = 0;
+                        if (operand.count >= DENSE) {
+                            const uint64_t* bits = dense.data() + operand.offset;
+                            for (uint16_t doc : cur) if ((bits[doc >> 6] >> (doc & 63)) & 1) cur[out++] = doc;
                         } else {
-                            if (o == Op::AND) {
-                                for (size_t w = 0; w < NW; ++w) cb[w] &= tb[w];
-                            } else if (o == Op::OR) {
-                                for (size_t w = 0; w < NW; ++w) cb[w] |= tb[w];
-                            } else {
-                                for (size_t w = 0; w < NW; ++w) cb[w] &= ~tb[w];
+                            const uint16_t* p = sparse_base + operand.offset, *end = p + operand.count;
+                            for (uint16_t doc : cur) {
+                                p = std::lower_bound(p, end, doc);
+                                if (p == end) break;
+                                if (*p == doc) cur[out++] = doc;
                             }
+                        }
+                        cur.resize(out);
+                    }
+                    for (uint16_t local : cur) if (phrase_matches(base + local, query)) add(base + local);
+                    continue;
+                }
+                for (size_t i = 0; i < query.op.size(); ++i) {
+                    Op op = query.op[i];
+                    const auto& operand = get_block(query.t[i + 1], b);
+                    if (operand.count >= DENSE) {
+                        const uint64_t* bits = dense.data() + operand.offset;
+                        if (bitmap) {
+                            if (op == Op::AND) apply_words<Op::AND>(cb.data(), bits, words);
+                            else if (op == Op::OR) apply_words<Op::OR>(cb.data(), bits, words);
+                            else apply_words<Op::NOT>(cb.data(), bits, words);
+                        } else if (op == Op::OR) {
+                            std::memcpy(cb.data(), bits, words * 8);
+                            for (uint16_t doc : cur) cb[doc >> 6] |= 1ULL << (doc & 63);
+                            bitmap = true;
+                        } else {
+                            size_t out = 0;
+                            for (uint16_t doc : cur) {
+                                bool present = (bits[doc >> 6] >> (doc & 63)) & 1;
+                                if (present == (op == Op::AND)) cur[out++] = doc;
+                            }
+                            cur.resize(out);
                         }
                         continue;
                     }
-
-                    auto [pl, psz] = (ti != ~0u) ? get_pos(ti) : std::pair<const uint32_t*, size_t>{nullptr, 0};
-
-                    if (!in_bitset && o == Op::OR && (cur.size() + psz > 16384)) {
-                        in_bitset = true;
-                        std::fill(cb.begin(), cb.end(), 0);
-                        for (uint32_t d : cur) cb[d >> 6] |= (1ULL << (d & 63));
+                    const uint16_t* p = sparse_base + operand.offset;
+                    size_t size = operand.count;
+                    if (!bitmap && op == Op::OR && cur.size() + size > DENSE) {
+                        std::fill(cb.begin(), cb.begin() + words, 0);
+                        for (uint16_t doc : cur) cb[doc >> 6] |= 1ULL << (doc & 63);
+                        bitmap = true;
                     }
-
-                    if (in_bitset) {
-                        if (o == Op::AND) {
+                    if (bitmap) {
+                        if (op == Op::AND) {
                             cur.clear();
-                            for (size_t k = 0; k < psz; ++k) {
-                                uint32_t d = pl[k];
-                                if (cb[d >> 6] & (1ULL << (d & 63))) cur.push_back(d);
-                            }
-                            in_bitset = false;
-                        } else if (o == Op::OR) {
-                            for (size_t k = 0; k < psz; ++k) cb[pl[k] >> 6] |= (1ULL << (pl[k] & 63));
+                            for (size_t k = 0; k < size; ++k) if ((cb[p[k] >> 6] >> (p[k] & 63)) & 1) cur.push_back(p[k]);
+                            bitmap = false;
+                        } else if (op == Op::OR) {
+                            for (size_t k = 0; k < size; ++k) cb[p[k] >> 6] |= 1ULL << (p[k] & 63);
                         } else {
-                            for (size_t k = 0; k < psz; ++k) cb[pl[k] >> 6] &= ~(1ULL << (pl[k] & 63));
+                            for (size_t k = 0; k < size; ++k) cb[p[k] >> 6] &= ~(1ULL << (p[k] & 63));
                         }
                     } else {
                         nxt.clear();
-                        const uint32_t* a = cur.data();
-                        size_t asz = cur.size(), ia = 0, ib = 0;
-                        if (o == Op::AND) {
-                            while (ia < asz && ib < psz) {
-                                if (a[ia] == pl[ib]) { nxt.push_back(a[ia]); ++ia; ++ib; }
-                                else if (a[ia] < pl[ib]) ++ia;
-                                else ++ib;
+                        size_t a = 0, k = 0;
+                        if (op == Op::AND) {
+                            while (a < cur.size() && k < size) {
+                                if (cur[a] == p[k]) { nxt.push_back(cur[a]); ++a; ++k; }
+                                else if (cur[a] < p[k]) ++a;
+                                else ++k;
                             }
-                        } else if (o == Op::OR) {
-                            while (ia < asz && ib < psz) {
-                                if (a[ia] == pl[ib]) { nxt.push_back(a[ia]); ++ia; ++ib; }
-                                else if (a[ia] < pl[ib]) nxt.push_back(a[ia++]);
-                                else nxt.push_back(pl[ib++]);
+                        } else if (op == Op::OR) {
+                            while (a < cur.size() && k < size) {
+                                if (cur[a] == p[k]) { nxt.push_back(cur[a]); ++a; ++k; }
+                                else if (cur[a] < p[k]) nxt.push_back(cur[a++]);
+                                else nxt.push_back(p[k++]);
                             }
-                            while (ia < asz) nxt.push_back(a[ia++]);
-                            while (ib < psz) nxt.push_back(pl[ib++]);
+                            while (a < cur.size()) nxt.push_back(cur[a++]);
+                            while (k < size) nxt.push_back(p[k++]);
                         } else {
-                            while (ia < asz && ib < psz) {
-                                if (a[ia] == pl[ib]) { ++ia; ++ib; }
-                                else if (a[ia] < pl[ib]) nxt.push_back(a[ia++]);
-                                else ++ib;
+                            while (a < cur.size() && k < size) {
+                                if (cur[a] == p[k]) { ++a; ++k; }
+                                else if (cur[a] < p[k]) nxt.push_back(cur[a++]);
+                                else ++k;
                             }
-                            while (ia < asz) nxt.push_back(a[ia++]);
+                            while (a < cur.size()) nxt.push_back(cur[a++]);
                         }
                         cur.swap(nxt);
                     }
                 }
-
-                uint32_t cnt = 0, f10[10], n10 = 0;
-                uint64_t isum = 0;
-                if (in_bitset) {
-                    for (size_t w = 0; w < NW; ++w) {
-                        uint64_t m = cb[w];
-                        if (!m) continue;
-                        uint32_t bits = __builtin_popcountll(m);
-                        cnt += bits;
-                        uint64_t base = w << 6;
-                        if (bits <= 8) {
-                            while (m) {
-                                uint32_t d = uint32_t(base + __builtin_ctzll(m));
-                                isum += d;
-                                if (n10 < 10) f10[n10++] = d;
-                                m &= m - 1;
-                            }
-                        } else {
-                            isum += base * bits
-                                + __builtin_popcountll(m & 0xaaaaaaaaaaaaaaaaULL)
-                                + 2ULL * __builtin_popcountll(m & 0xccccccccccccccccULL)
-                                + 4ULL * __builtin_popcountll(m & 0xf0f0f0f0f0f0f0f0ULL)
-                                + 8ULL * __builtin_popcountll(m & 0xff00ff00ff00ff00ULL)
-                                + 16ULL * __builtin_popcountll(m & 0xffff0000ffff0000ULL)
-                                + 32ULL * __builtin_popcountll(m & 0xffffffff00000000ULL);
-                            while (m && n10 < 10) {
-                                f10[n10++] = uint32_t(base + __builtin_ctzll(m));
-                                m &= m - 1;
-                            }
-                        }
-                    }
-                } else {
-                    cnt = uint32_t(cur.size());
-                    n10 = std::min<uint32_t>(10, cnt);
-                    for (uint32_t i = 0; i < n10; ++i) f10[i] = cur[i];
-                    for (uint32_t d : cur) isum += d;
-                }
-                fmt_res(rs, cnt, isum, f10, n10);
-            } else {
-                const auto& ts = it.t;
-                const auto& rw = it.rw;
-                size_t K = ts.size();
-                bool emp = false;
-                for (uint32_t ti : ts) if (ti == ~0u || df_cnt[ti] == 0) { emp = true; break; }
-                if (emp) { rs = "0 0"; continue; }
-
-                std::array<size_t, 16> ord;
-                for (size_t i = 0; i < K; ++i) ord[i] = i;
-                std::sort(ord.begin(), ord.begin() + K, [&](size_t a, size_t b) {
-                    return df_cnt[ts[a]] < df_cnt[ts[b]];
-                });
-
-                uint32_t rarest_t = ts[ord[0]];
-                uint32_t bsi0 = bitset_map[rarest_t];
-                if (bsi0 != ~0u) {
-                    cur.clear();
-                    const uint64_t* tb = bitsets[bsi0].data();
-                    for (size_t w = 0; w < NW; ++w) {
-                        uint64_t wrd = tb[w];
-                        while (wrd) {
-                            cur.push_back(uint32_t(w * 64 + __builtin_ctzll(wrd)));
-                            wrd &= wrd - 1;
-                        }
-                    }
-                } else {
-                    auto [first_p, first_sz] = get_pos(rarest_t);
-                    cur.assign(first_p, first_p + first_sz);
-                }
-
-                for (size_t idx = 1; idx < K && !cur.empty(); ++idx) {
-                    uint32_t ti = ts[ord[idx]];
-                    if (ti == ts[ord[idx - 1]]) continue;
-                    uint32_t bsi = bitset_map[ti];
-                    if (bsi != ~0u) {
-                        const uint64_t* tb = bitsets[bsi].data();
-                        size_t o = 0;
-                        for (uint32_t d : cur) {
-                            if (tb[d >> 6] & (1ULL << (d & 63))) cur[o++] = d;
-                        }
-                        cur.resize(o);
-                    } else {
-                        auto [pl, psz] = get_pos(ti);
-                        size_t o = 0;
-                        const uint32_t* search_beg = pl;
-                        const uint32_t* search_end = pl + psz;
-                        for (uint32_t d : cur) {
-                            search_beg = std::lower_bound(search_beg, search_end, d);
-                            if (search_beg == search_end) break;
-                            if (*search_beg == d) cur[o++] = d;
-                        }
-                        cur.resize(o);
-                    }
-                }
-
-                uint32_t cnt = 0, f10[10], n10 = 0;
-                uint64_t isum = 0;
-                size_t w0_len = rw[0].size();
-                uint8_t w0_c0 = uint8_t(rw[0][0]);
-
-                for (uint32_t d : cur) {
-                    const char* tp = dr[d].p, * te = tp + dr[d].l;
-                    bool ok = false;
-                    while (tp < te) {
-                        while (tp < te && !CHAR_MAP[(uint8_t)*tp]) ++tp;
-                        if (tp >= te) break;
-                        const char* st = tp;
-                        while (tp < te && CHAR_MAP[(uint8_t)*tp]) ++tp;
-                        if (size_t(tp - st) == w0_len && CHAR_MAP[(uint8_t)st[0]] == w0_c0) {
-                            bool m0 = true;
-                            for (size_t i = 1; i < w0_len; ++i) {
-                                if (CHAR_MAP[(uint8_t)st[i]] != uint8_t(rw[0][i])) { m0 = false; break; }
-                            }
-                            if (m0) {
-                                const char* p2 = tp;
-                                bool all_m = true;
-                                for (size_t j = 1; j < K; ++j) {
-                                    while (p2 < te && !CHAR_MAP[(uint8_t)*p2]) ++p2;
-                                    if (p2 >= te) { all_m = false; break; }
-                                    const char* st2 = p2;
-                                    while (p2 < te && CHAR_MAP[(uint8_t)*p2]) ++p2;
-                                    if (size_t(p2 - st2) != rw[j].size()) { all_m = false; break; }
-                                    for (size_t i = 0; i < rw[j].size(); ++i) {
-                                        if (CHAR_MAP[(uint8_t)st2[i]] != uint8_t(rw[j][i])) { all_m = false; break; }
-                                    }
-                                    if (!all_m) break;
-                                }
-                                if (all_m) { ok = true; break; }
-                            }
-                        }
-                    }
-                    if (ok) {
-                        cnt++;
-                        isum += d;
-                        if (n10 < 10) f10[n10++] = d;
-                    }
-                }
-                fmt_res(rs, cnt, isum, f10, n10);
+                if (bitmap) {
+                    for (size_t w = 0; w < words; ++w) if (cb[w]) summarize(cb[w], base + uint32_t(w * 64));
+                } else for (uint16_t doc : cur) add(base + doc);
             }
+            char buf[32];
+            auto& result = res[q];
+            auto number = [&](uint64_t value) { result.append(buf, std::to_chars(buf, buf + 32, value).ptr); };
+            number(count); result += ' '; number(sum);
+            for (uint32_t i = 0; i < nfirst; ++i) { result += ' '; number(first[i]); }
         }
     });
-
     std::string out;
     out.reserve(NQ * 32);
-    for (size_t q = 0; q < NQ; ++q) {
-        out.append(res[q]);
-        out += '\n';
-    }
+    for (const auto& result : res) { out += result; out += '\n'; }
     int ofd = open((std::string(od) + "/results.txt").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    [[maybe_unused]] auto wr = write(ofd, out.data(), out.size());
+    size_t sent = 0;
+    while (sent < out.size()) {
+        ssize_t n = write(ofd, out.data() + sent, out.size() - sent);
+        if (n <= 0) _exit(1);
+        sent += size_t(n);
+    }
     close(ofd);
     _exit(0);
 }

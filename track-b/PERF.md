@@ -70,3 +70,11 @@ Cache the first pass's distinct queried-term/document memberships as variable-by
 ## Scorer rejection of55a8300 — 2026-11-02
 
 User-supplied result: 51.392points versus 52.043 on bf0d8c4, delta -0.651. Restore the bf0d8c4 implementation while retaining Track A's accepted ordered-output change. Acceptance uses scorer K/points with correctness gates; no new local tests or benchmarks were run. These rounded observations do not isolate every cause or estimate run variance.
+
+## Adaptive block index candidate — 2026-11-02
+
+Replace whole-term32-bit sparse postings and global bitmap/list transitions with65,536-document blocks. Each term/block stores sorted16-bit offsets below4,096 members, otherwise a bitmap. Boolean expressions execute left-to-right within each block, using explicit AVX2 AND/OR/AND-NOT for dense operands and a scalar tail/fallback. Phrase candidates still use rarest-first membership intersection and exact raw-token verification. Full bitmaps for every query term are not allocated.
+
+Construction retains two corpus scans to allocate the final index exactly, with no intermediate hit spool or replay cache. Worker-local block counters become sparse write cursors; document ranges remain64-aligned for exclusive bitmap-word writes. Sparse payload is2bytes per posting; a dense block costs at most8,192bytes for at least4,096members, so posting payload is at most2times total distinct queried memberships. For the profiled22,240,530members this bound is44,481,060bytes, excluding metadata, counters, dictionaries and query scratch. This is an allocation model, not measured peak RSS.
+
+The previous restored B baseline scored52.043points in the user-supplied bf0d8c4 screenshot. No local build, correctness check or benchmark was run for this rewrite, per the user's instruction. Scorer correctness and T/M/S/K are pending. A/C/D implementations are retained.
