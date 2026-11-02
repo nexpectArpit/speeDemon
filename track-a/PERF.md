@@ -65,3 +65,7 @@ Encode common records in four bytes:20latency bits,11endpoint-ID bits and one er
 ## Restore last measured best source — 2026-11-02
 
 The evaluated compact-record revision in commit1393442 scored75.538016 points (42.563ms,23,994,368bytes,S371). Restored `main.cpp` from55a8300, whose board result was75.720077 points (39.916ms,30,326,784bytes,S318). The measured source-size and time gains outweighed its higher memory in the official score. Relative to1393442, the points delta is+0.182042 and the approximate log-loss change is `L=ln(K_old/K_new)=-0.00839`; board run variance means the next evaluation must confirm it. Source restore only; no local test was run. This is the prior measured best, not a new optimization claim.
+
+## SSE2 latency decimal parsing candidate — 2026-11-02
+
+The prior A source still converts every latency with a scalar multiply/add loop. Added a bounded SSE2 SWAR path for runs of at least five digits, with the scalar tail preserving exact uint32 values including UINT32_MAX. This should help long latency strings; short values remain scalar. Current board run for the unchanged source was72.527 points at53.167ms/30,892,032bytes/S318, while the recorded best is75.720. That timing spread is too large to attribute to code; the parser candidate is evaluated separately in the batch. No local test was run.

@@ -81,3 +81,7 @@ The latest evaluated exact but thread-local-bitmap version on5e14de6 scored57.49
 ## SIMD decimal conversion candidate — 2026-11-02
 
 Parse row IDs, region IDs and the integer part of the amount with an SSE2 SWAR path when at least five leading digits are available; retain scalar parsing for shorter numbers and remaining digits. The reader is bounded by the worker's record range. This targets repeated decimal accumulation across3.32million records without changing field boundaries or numeric width. Scorer T/K are pending; no local test was run.
+
+## Reject SIMD numeric parser candidate — 2026-11-02
+
+Commit e6699b3 scored67.388228 points at65.280ms/17,661,952bytes/S419, versus67.465437 at65.303ms/18,051,072bytes/S397 on65015f5. Time was effectively unchanged, memory fell slightly, but the extra22 formatted lines lowered points by0.077. Reverted the numeric parser and kept the simpler exact parser. Approximate loss is `L=(67.465437-67.388228)*ln(10)/50=+0.00356`.

@@ -42,6 +42,31 @@ inline size_t hi(const char* t) {
     return size_t(ds * 24 + (t[11] - '0') * 10 + t[12] - '0' - 18);
 }
 
+inline uint32_t parse_latency(const char*& p, const char* end) {
+    uint64_t value = 0;
+#if defined(__SSE2__)
+    if (end - p >= 8 && p[4] >= '0' && p[4] <= '9') {
+        uint64_t word; memcpy(&word, p, 8);
+        __m128i bytes = _mm_cvtsi64_si128(static_cast<long long>(word));
+        unsigned mask = unsigned(_mm_movemask_epi8(_mm_and_si128(
+            _mm_cmpgt_epi8(bytes, _mm_set1_epi8('0' - 1)),
+            _mm_cmpgt_epi8(_mm_set1_epi8('9' + 1), bytes)))) & 255;
+        unsigned n = mask == 255 ? 8 : unsigned(__builtin_ctz((~mask) & 255));
+        if (n) {
+            uint64_t digits = word & 0x0f0f0f0f0f0f0f0fULL;
+            if (n < 8) digits &= (1ULL << (n * 8)) - 1;
+            digits <<= (8 - n) * 8;
+            digits = (digits * 10 + (digits >> 8)) & 0x00ff00ff00ff00ffULL;
+            digits = (digits * 100 + (digits >> 16)) & 0x0000ffff0000ffffULL;
+            value = uint32_t(digits * 10000 + (digits >> 32));
+            p += n;
+        }
+    }
+#endif
+    while (p < end && *p >= '0' && *p <= '9') value = value * 10 + uint8_t(*p++ - '0');
+    return uint32_t(value);
+}
+
 struct GlobalEndpointDict {
     std::atomic<uint64_t> tb_h[TS]{};
     std::atomic<const char*> tb_p[TS]{};
@@ -130,8 +155,7 @@ int main(int ac, char** av) {
                 if (l1[l1_idx].l == el && !memcmp(l1[l1_idx].p, es, el)) ei = l1[l1_idx].id;
                 else { ei = g_dict.get_or_insert(es, el); l1[l1_idx] = {es, el, ei}; }
                 c = sp + 1; bool is_err = (c[0] == '5'); c += 4;
-                uint32_t lat = 0;
-                while (*c != '\n') { lat = lat * 10 + uint32_t(*c - '0'); ++c; }
+                uint32_t lat = parse_latency(c, e);
                 ++c;
                 recs[h].push_back({lat, uint16_t(ei | (is_err ? 0x8000 : 0))});
             }
