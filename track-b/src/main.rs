@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Write as IoWrite;
 use std::os::unix::io::AsRawFd;
 use std::thread;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
@@ -74,7 +75,7 @@ const CHAR_MAP: [u8; 256] = {
 #[inline(always)]
 fn fast_hash_swar(p: &[u8]) -> u64 {
     let len = p.len();
-    let mut h = 0x517cc1b727220a95u64 ^ ((len as u64) * 0x9e3779b97f4a7c15u64);
+    let mut h = 0x517cc1b727220a95u64 ^ (len as u64).wrapping_mul(0x9e3779b97f4a7c15u64);
     let mut i = 0;
     while i + 8 <= len {
         let mut w = u64::from_le_bytes(p[i..i + 8].try_into().unwrap());
@@ -121,8 +122,7 @@ fn same_word(a: &[u8], b: &[u8]) -> bool {
 struct DictEntry {
     h64: u64,
     id: u32,
-    offset: u32,
-    len: u8,
+    key: u32,
 }
 
 struct Dict {
@@ -134,7 +134,7 @@ struct Dict {
 impl Dict {
     fn new(cap: usize) -> Self {
         Self {
-            entries: vec![DictEntry { h64: 0, id: 0, offset: 0, len: 0 }; cap],
+            entries: vec![DictEntry { h64: 0, id: 0, key: 0 }; cap],
             keys: Vec::new(),
             count: 0,
         }
@@ -142,7 +142,7 @@ impl Dict {
 
     fn grow(&mut self) {
         let new_cap = self.entries.len() * 2;
-        let mut new_entries = vec![DictEntry { h64: 0, id: 0, offset: 0, len: 0 }; new_cap];
+        let mut new_entries = vec![DictEntry { h64: 0, id: 0, key: 0 }; new_cap];
         let mask = (new_cap - 1) as u32;
         for e in &self.entries {
             if e.id != 0 {
@@ -163,8 +163,8 @@ impl Dict {
         let mut x = (h as u32) & mask;
         while self.entries[x as usize].id != 0 {
             let e = self.entries[x as usize];
-            if e.h64 == h && (e.len as usize) == s.len() {
-                let key_slice = &self.keys[e.offset as usize..(e.offset as usize + s.len())];
+            if e.h64 == h && ((e.key >> 24) as usize) == s.len() {
+                let key_slice = &self.keys[(e.key & 0x00ff_ffff) as usize..((e.key & 0x00ff_ffff) as usize + s.len())];
                 if same_word(key_slice, s) {
                     return e.id - 1;
                 }
@@ -178,12 +178,12 @@ impl Dict {
         let id = self.count;
         self.count += 1;
         let offset = self.keys.len() as u32;
+        assert!(self.keys.len() <= 0x00ff_ffff && s.len() <= 255);
         self.keys.extend_from_slice(s);
         self.entries[x as usize] = DictEntry {
             h64: h,
             id: id + 1,
-            offset,
-            len: s.len() as u8,
+            key: offset | ((s.len() as u32) << 24),
         };
         id
     }
@@ -194,8 +194,8 @@ impl Dict {
         let mut x = (h as u32) & mask;
         while self.entries[x as usize].id != 0 {
             let e = self.entries[x as usize];
-            if e.h64 == h && (e.len as usize) == s.len() {
-                let key_slice = &self.keys[e.offset as usize..(e.offset as usize + s.len())];
+            if e.h64 == h && ((e.key >> 24) as usize) == s.len() {
+                let key_slice = &self.keys[(e.key & 0x00ff_ffff) as usize..((e.key & 0x00ff_ffff) as usize + s.len())];
                 if same_word(key_slice, s) {
                     return e.id - 1;
                 }
@@ -203,6 +203,28 @@ impl Dict {
             x = (x + 1) & mask;
         }
         !0u32
+    }
+}
+
+
+#[derive(Clone, Copy)]
+struct CacheEntry { key: u64, id: u32, len: u8 }
+struct TokenCache { slots: Vec<CacheEntry> }
+impl TokenCache {
+    fn new() -> Self { Self { slots: vec![CacheEntry { key: 0, id: !0u32, len: 0 }; 4096] } }
+    #[inline(always)]
+    fn lookup(&mut self, dict: &Dict, token: &[u8]) -> u32 {
+        if token.len() > 8 { return dict.find(fast_hash_swar(token), token); }
+        let mut bytes = [0u8; 8];
+        bytes[..token.len()].copy_from_slice(token);
+        let mut key = u64::from_le_bytes(bytes) | 0x2020202020202020u64;
+        if token.len() < 8 { key &= (1u64 << (8 * token.len())) - 1; }
+        let index = (((key ^ (key >> 32)).wrapping_mul(0x9e3779b97f4a7c15)) >> 52) as usize;
+        let entry = &mut self.slots[index];
+        if entry.len as usize == token.len() && entry.key == key { return entry.id; }
+        let id = dict.find(fast_hash_swar(token), token);
+        *entry = CacheEntry { key, id, len: token.len() as u8 };
+        id
     }
 }
 
@@ -260,6 +282,7 @@ impl Accumulator {
 }
 
 fn main() {
+    let t_start = std::time::Instant::now();
     let args: Vec<String> = std::env::args().collect();
     let data_dir = if args.len() >= 2 { &args[1] } else { "/data" };
     let out_dir = if args.len() >= 3 { &args[2] } else { "/out" };
@@ -333,6 +356,8 @@ fn main() {
     }
 
     let num_terms = dict.count as usize;
+    eprintln!("[PERF] Parse queries: {:?}", t_start.elapsed());
+    let t_queries_done = std::time::Instant::now();
 
     let df = MmapFile::open(&format!("{}/docs.txt", data_dir));
     let doc_bytes = df.as_slice();
@@ -395,6 +420,7 @@ fn main() {
                 let end_idx = chunk_range[1];
                 let mut sc = start_idx;
                 let mut last_doc = vec![!0u32; num_terms];
+                let mut token_cache = TokenCache::new();
 
                 while sc < end_idx {
                     let mut doc_id = 0u32;
@@ -438,8 +464,7 @@ fn main() {
                         let tok_len = tp - tok_start;
                         if tok_len <= 32 {
                             let tok = &text[tok_start..tp];
-                            let h = fast_hash_swar(tok);
-                            let tid = dict_ref.find(h, tok);
+                            let tid = token_cache.lookup(dict_ref, tok);
                             if tid != !0u32 && last_doc[tid as usize] != doc_id {
                                 last_doc[tid as usize] = doc_id;
                                 wdf[tid as usize] += 1;
@@ -450,6 +475,8 @@ fn main() {
             });
         }
     });
+    eprintln!("[PERF] Pass 1 (scan docs & freq): {:?}", t_queries_done.elapsed());
+    let t_pass1_done = std::time::Instant::now();
 
     // Sum document frequencies and identify dense terms
     let mut total_df = vec![0u32; num_terms];
@@ -478,6 +505,8 @@ fn main() {
         }
     }
 
+    drop(worker_df);
+
     // Flat 1D bitset buffer: (num_dense * num_words) contiguous u64 words
     let mut dense_bitsets = vec![0u64; (num_dense as usize) * num_words];
     let dense_bitsets_addr = dense_bitsets.as_mut_ptr() as usize;
@@ -497,6 +526,7 @@ fn main() {
                 let end_idx = chunk_range[1];
                 let mut sc = start_idx;
                 let mut last_doc = vec![!0u32; num_terms];
+                let mut token_cache = TokenCache::new();
 
                 while sc < end_idx {
                     let mut doc_id = 0u32;
@@ -532,8 +562,7 @@ fn main() {
                         let tok_len = tp - tok_start;
                         if tok_len <= 32 {
                             let tok = &text[tok_start..tp];
-                            let h = fast_hash_swar(tok);
-                            let tid = dict_ref.find(h, tok);
+                            let tid = token_cache.lookup(dict_ref, tok);
                             if tid != !0u32 && last_doc[tid as usize] != doc_id {
                                 last_doc[tid as usize] = doc_id;
                                 let bs_id = bitset_map_ref[tid as usize];
@@ -557,6 +586,8 @@ fn main() {
             });
         }
     });
+    eprintln!("[PERF] Pass 2 (fill bitsets & postings): {:?}", t_pass1_done.elapsed());
+    let t_pass2_done = std::time::Instant::now();
 
     let doc_refs = doc_refs_vec;
 
@@ -601,6 +632,10 @@ fn main() {
 
     let num_queries = queries.len();
     let mut results = vec![String::new(); num_queries];
+    let mut candidates: Vec<Vec<u32>> = vec![Vec::new(); num_queries];
+    const CANDIDATE_LIMIT: usize = 1 << 20;
+    let candidate_count = AtomicUsize::new(0);
+    let candidate_count_ref = &candidate_count;
 
     // Compute sparse posting list slices (start, len)
     let mut term_slices: Vec<(u32, u32)> = vec![(0, 0); num_terms];
@@ -623,10 +658,10 @@ fn main() {
     let term_slices_ref = &term_slices;
 
     // Partition queries across threads: safe, zero-unsafe chunking
-    let chunk_size = (num_queries + num_threads - 1) / num_threads;
+    let chunk_size = ((num_queries + num_threads - 1) / num_threads).max(1);
 
     thread::scope(|s| {
-        for (wid, res_chunk) in results.chunks_mut(chunk_size).enumerate() {
+        for (wid, (res_chunk, candidate_chunk)) in results.chunks_mut(chunk_size).zip(candidates.chunks_mut(chunk_size)).enumerate() {
             let start_q = wid * chunk_size;
             s.spawn(move || {
                 let mut cb = vec![0u64; num_words];
@@ -640,7 +675,9 @@ fn main() {
 
                     match query {
                         QueryKind::Phrase { terms, words } => {
-                            let mut order: Vec<usize> = (0..terms.len()).collect();
+                            let mut order_storage = [0usize; 8];
+                            for (i, slot) in order_storage[..terms.len()].iter_mut().enumerate() { *slot = i; }
+                            let order = &mut order_storage[..terms.len()];
                             let mut absent = false;
                             for &t in terms {
                                 if total_df_ref[t as usize] == 0 {
@@ -687,13 +724,21 @@ fn main() {
                                     } else {
                                         let (off, len) = term_slices_ref[t];
                                         let slice = &postings_slice[off as usize..(off + len) as usize];
-                                        cur.retain(|&doc| slice.binary_search(&doc).is_ok());
+                                        let mut cursor = 0;
+                                        cur.retain(|&doc| {
+                                            cursor += slice[cursor..].partition_point(|&value| value < doc);
+                                            cursor < slice.len() && slice[cursor] == doc
+                                        });
                                     }
                                 }
 
-                                for &doc in &cur {
-                                    if phrase_matches(doc, words) {
-                                        acc.add(doc);
+                                let reserved = candidate_count_ref.fetch_add(cur.len(), Ordering::Relaxed);
+                                if reserved.saturating_add(cur.len()) <= CANDIDATE_LIMIT {
+                                    candidate_chunk[local_idx].extend_from_slice(&cur);
+                                } else {
+                                    candidate_count_ref.fetch_sub(cur.len(), Ordering::Relaxed);
+                                    for &doc in &cur {
+                                        if phrase_matches(doc, words) { acc.add(doc); }
                                     }
                                 }
                             }
@@ -895,6 +940,91 @@ fn main() {
             });
         }
     });
+
+
+
+    // Group bounded phrase candidates by document; tokenize each selected document once.
+    let total_candidates: usize = candidates.iter().map(Vec::len).sum();
+    let mut pairs = Vec::with_capacity(total_candidates);
+    for (query, docs) in candidates.into_iter().enumerate() {
+        for doc in docs { pairs.push(((doc as u64) << 32) | query as u64); }
+    }
+    pairs.sort_unstable();
+    let mut group_bounds = vec![0usize; num_threads + 1];
+    group_bounds[num_threads] = pairs.len();
+    for (i, bound) in group_bounds.iter_mut().enumerate().take(num_threads).skip(1) {
+        let mut pos = pairs.len() * i / num_threads;
+        while pos > 0 && pos < pairs.len() && (pairs[pos] >> 32) == (pairs[pos - 1] >> 32) { pos += 1; }
+        *bound = pos;
+    }
+    let pairs_ref = &pairs;
+    let docs_ref = &doc_refs;
+    let local_matches: Vec<Vec<u64>> = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for range in group_bounds.windows(2) {
+            if range[0] == range[1] { continue; }
+            let begin = range[0]; let end = range[1];
+            handles.push(scope.spawn(move || {
+                let mut found = Vec::new();
+                let mut tokens: Vec<(usize, usize)> = Vec::with_capacity(256);
+                let mut pos = begin;
+                while pos < end {
+                    let doc_id = (pairs_ref[pos] >> 32) as u32;
+                    let mut next = pos + 1;
+                    while next < end && (pairs_ref[next] >> 32) as u32 == doc_id { next += 1; }
+                    let doc = docs_ref[doc_id as usize];
+                    let text = &doc_bytes[doc.offset as usize..(doc.offset as usize + doc.len as usize)];
+                    tokens.clear();
+                    let mut at = 0;
+                    while at < text.len() {
+                        while at < text.len() && CHAR_MAP[text[at] as usize] == 0 { at += 1; }
+                        if at == text.len() { break; }
+                        let start = at;
+                        while at < text.len() && CHAR_MAP[text[at] as usize] != 0 { at += 1; }
+                        tokens.push((start, at));
+                    }
+                    for pair in &pairs_ref[pos..next] {
+                        let query_id = *pair as u32;
+                        if let QueryKind::Phrase { words, .. } = &queries_ref[query_id as usize] {
+                            if tokens.len() < words.len() { continue; }
+                            for start in 0..=tokens.len() - words.len() {
+                                let mut matches = true;
+                                for (i, word) in words.iter().enumerate() {
+                                    let (a, b) = tokens[start + i];
+                                    if !same_word(&text[a..b], word) { matches = false; break; }
+                                }
+                                if matches { found.push(((query_id as u64) << 32) | doc_id as u64); break; }
+                            }
+                        }
+                    }
+                    pos = next;
+                }
+                found
+            }));
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    drop(pairs);
+    let mut matches = Vec::with_capacity(local_matches.iter().map(Vec::len).sum::<usize>());
+    for local in local_matches { matches.extend(local); }
+    matches.sort_unstable();
+    let mut pos = 0;
+    while pos < matches.len() {
+        let query = (matches[pos] >> 32) as usize;
+        let mut acc = Accumulator::new();
+        while pos < matches.len() && (matches[pos] >> 32) as usize == query {
+            acc.add(matches[pos] as u32); pos += 1;
+        }
+        let out = &mut results[query];
+        out.clear();
+        write!(out, "{} {}", acc.count, acc.sum).unwrap();
+        for id in &acc.first[..acc.nfirst] { write!(out, " {}", id).unwrap(); }
+        out.push('\n');
+    }
+    drop(matches);
+
+    eprintln!("[PERF] Queries execution: {:?}", t_pass2_done.elapsed());
+    let t_queries_eval_done = std::time::Instant::now();
 
     // Write results to results.txt
     let out_path = format!("{}/results.txt", out_dir);
