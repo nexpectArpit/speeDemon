@@ -57,3 +57,7 @@ User-supplied board results for d1865fc: T≈0.085s, M≈19.0MB, S412,64.259poin
 ## Batched quote scanning candidate — 2026-11-02
 
 On AVX2 builds, reuse a32-byte quote mask across quoted name/note searches. Skip consumed escape quotes and numeric-field gaps using the next requested byte position; preserve existing decoded-length accounting and exact name publication/equality. Short tails and non-AVX2 builds use memchr. This is a batched quote scanner, not a complete replacement CSV parser. No local build, test or benchmark was run; score impact is pending.
+
+## Scorer rejection of55a8300 — 2026-11-02
+
+User-supplied result: 66.938points versus 67.416 on bf0d8c4, delta -0.478. Restore the bf0d8c4 implementation while retaining Track A's accepted ordered-output change. Acceptance uses scorer K/points with correctness gates; no new local tests or benchmarks were run. These rounded observations do not isolate every cause or estimate run variance.

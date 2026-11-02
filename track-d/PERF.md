@@ -54,3 +54,7 @@ Store radix queue items in12 bytes instead of a16-byte pair. Prune relaxations w
 ## Worker-owned degree counting candidate — 2026-11-02
 
 Replace shared atomic degree increments with per-worker byte counters, reduce them into the global forward/reverse degrees, and release counter ownership before CSR edge allocation. Record every byte-counter wrap and add256 during reduction, preserving high-degree vertices exactly. At n=1,740,512 and12 workers the counter payload is41,772,288bytes, excluding the construction prototype and overflow metadata. CSR scatter still uses atomic cursors. This exchanges temporary memory and a reduction pass for removing two shared atomic updates per input edge. Allocator return to the OS and a score gain are not guaranteed. No local build, test or benchmark was run; scorer results are pending.
+
+## Scorer rejection of55a8300 — 2026-11-02
+
+User-supplied result: 55.173points versus 56.437 on bf0d8c4, delta -1.264. Restore the bf0d8c4 implementation while retaining Track A's accepted ordered-output change. Acceptance uses scorer K/points with correctness gates; no new local tests or benchmarks were run. These rounded observations do not isolate every cause or estimate run variance.

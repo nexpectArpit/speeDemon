@@ -137,34 +137,17 @@ int main(int ac, char** av) {
     }
 
     std::vector<uint32_t> fo(n + 1, 0), ro(n + 1, 0);
-    std::vector<std::vector<uint8_t>> degrees(W, std::vector<uint8_t>(size_t(n) * 2));
-    std::vector<std::vector<size_t>> overflows(W);
     par(W, [&](size_t w) {
         const char* sc = bn[w], *lim = bn[w + 1];
-        auto& local = degrees[w];
         while (sc < lim) {
             if (*sc < '0') { ++sc; continue; }
             uint32_t u = pu(sc, lim); ++sc; uint32_t v = pu(sc, lim);
             while (sc < lim && *sc != '\n') ++sc;
             if (sc < lim) ++sc;
-            if (++local[u] == 0) overflows[w].push_back(u);
-            size_t rv = size_t(n) + v;
-            if (++local[rv] == 0) overflows[w].push_back(rv);
+            std::atomic_ref<uint32_t>(fo[u]).fetch_add(1, std::memory_order_relaxed);
+            std::atomic_ref<uint32_t>(ro[v]).fetch_add(1, std::memory_order_relaxed);
         }
     });
-    par(W, [&](size_t w) {
-        for (size_t u = size_t(n) * w / W, end = size_t(n) * (w + 1) / W; u < end; ++u) {
-            uint32_t f = 0, r = 0;
-            for (size_t k = 0; k < W; ++k) { f += degrees[k][u]; r += degrees[k][size_t(n) + u]; }
-            fo[u] = f; ro[u] = r;
-        }
-    });
-    for (const auto& overflow : overflows) for (size_t key : overflow) {
-        if (key < n) fo[key] += 256;
-        else ro[key - n] += 256;
-    }
-    std::vector<std::vector<uint8_t>>().swap(degrees);
-    std::vector<std::vector<size_t>>().swap(overflows);
 
     uint32_t sf = 0, sr = 0;
     for (uint32_t i = 0; i <= n; ++i) {

@@ -66,3 +66,7 @@ User-supplied board results for d1865fc: T≈0.895s, M≈281.5MB, S752,47.029poi
 ## Bounded compressed replay candidate — 2026-11-02
 
 Cache the first pass's distinct queried-term/document memberships as variable-byte IDs with per-document delimiters, under a fixed48MiB total allocation budget divided among workers. Cache only complete document prefixes: roll back a partial document when the budget fills. During construction, replay the cached prefix directly and tokenize only the uncached suffix. Release each worker's cache before scanning its suffix. This retains exact sparse/dense index semantics and avoids the unbounded64-bit hit spool. The cache cap is not a total-process memory cap; final index and other state coexist with it. Extra encoding work, increased peak memory and formatted source must be repaid by lower scorer T. No local build, test or benchmark was run; score impact is pending.
+
+## Scorer rejection of55a8300 — 2026-11-02
+
+User-supplied result: 51.392points versus 52.043 on bf0d8c4, delta -0.651. Restore the bf0d8c4 implementation while retaining Track A's accepted ordered-output change. Acceptance uses scorer K/points with correctness gates; no new local tests or benchmarks were run. These rounded observations do not isolate every cause or estimate run variance.
