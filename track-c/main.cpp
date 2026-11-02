@@ -19,7 +19,7 @@
 static constexpr size_t G_SIZE = 262144;
 static constexpr uint32_t G_MASK = G_SIZE - 1;
 static constexpr size_t MAX_COUNTRIES = 242;
-static constexpr size_t BITSET_WORDS = G_SIZE / 64; // 4096 words
+static constexpr size_t BITSET_WORDS = 2048; // 131,072 distinct names max
 
 struct Agg {
     uint64_t count = 0;
@@ -33,7 +33,6 @@ alignas(64) static const char* g_name_ptr[G_SIZE];
 alignas(64) static uint32_t g_name_id[G_SIZE];
 static std::atomic<uint32_t> g_name_count{0};
 alignas(64) static std::atomic<uint32_t> g_name_len[G_SIZE];
-alignas(64) static std::atomic<uint64_t> g_country_bits[MAX_COUNTRIES][BITSET_WORDS];
 static uint8_t r2c[1000000];
 
 inline uint64_t hash_bytes(const char* p, size_t len) {
@@ -196,38 +195,14 @@ int main(int ac, char** av) {
     uint32_t empty_slot = get_name_slot("", 0, hash_bytes("", 0), arenas[0]);
     uint32_t empty_id = g_name_id[empty_slot];
     std::vector<std::vector<Agg>> sh(W, std::vector<Agg>(NC));
+    std::vector<std::vector<uint64_t>> worker_bits(W, std::vector<uint64_t>(NC * BITSET_WORDS, 0));
 
     auto worker = [&](size_t wid) {
         auto& ag = sh[wid];
-        struct L1Entry { uint64_t hash = 0; const char* p = nullptr; uint32_t len = 0; uint32_t slot = 0; };
-        L1Entry l1[4096]{};
-
-        struct Pending { const char* name; uint64_t hash; uint32_t len; uint8_t country; uint32_t id; };
-        Pending pending[32];
-        size_t queued = 0;
-        auto flush = [&]() {
-            for (size_t i = 0; i < queued; ++i) {
-                auto& item = pending[i];
-                if (item.len) {
-                    uint32_t index = uint32_t(item.hash ^ (item.hash >> 12)) & 4095;
-                    auto& cached = l1[index];
-                    if (cached.hash == item.hash && cached.len == item.len && !memcmp(cached.p, item.name, item.len)) item.id = cached.slot;
-                    else {
-                        uint32_t slot = get_name_slot(item.name, item.len, item.hash, arenas[wid]);
-                        item.id = g_name_id[slot];
-                        cached = {item.hash, g_name_ptr[slot], item.len, item.id};
-                    }
-                }
-                __builtin_prefetch(&g_country_bits[item.country][item.id >> 6], 1, 3);
-            }
-            for (size_t i = 0; i < queued; ++i) {
-                const auto& item = pending[i];
-                uint64_t mask = 1ULL << (item.id & 63);
-                auto& word = g_country_bits[item.country][item.id >> 6];
-                if (!(word.load(std::memory_order_relaxed) & mask)) word.fetch_or(mask, std::memory_order_relaxed);
-            }
-            queued = 0;
-        };
+        uint64_t* my_bits = worker_bits[wid].data();
+        struct L1Entry { uint64_t hash = 0; const char* p = nullptr; uint32_t len = 0; uint32_t id = 0; };
+        L1Entry l1[8192]{};
+        constexpr uint32_t L1_MASK = 8191;
 
         const char* c = bn[wid];
         const char* end = bn[wid + 1];
@@ -252,13 +227,6 @@ int main(int ac, char** av) {
                 }
                 raw_len = uint32_t(c - name_start);
                 name_len = raw_len - esc_cnt;
-                if (raw_len) {
-                    nh = hash_bytes(name_start, raw_len);
-                    uint32_t index = uint32_t(nh ^ (nh >> 32)) & G_MASK;
-                    __builtin_prefetch(&g_hash_keys[index], 0, 3);
-                    __builtin_prefetch(&g_name_len[index], 0, 3);
-                    __builtin_prefetch(&g_name_ptr[index], 0, 3);
-                }
                 c += 2; // skip '"' and ','
             } else {
                 ++c; // empty unquoted name, skip ','
@@ -295,8 +263,22 @@ int main(int ac, char** av) {
             if (*c == '\r') ++c;
             if (*c == '\n') ++c;
 
-            pending[queued++] = {name_start, nh, raw_len, cid, empty_id};
-            if (queued == 32) flush();
+            uint32_t name_id = empty_id;
+            if (raw_len) {
+                nh = hash_bytes(name_start, raw_len);
+                uint32_t l1_idx = uint32_t(nh ^ (nh >> 16)) & L1_MASK;
+                if (l1[l1_idx].hash == nh && l1[l1_idx].len == raw_len && !memcmp(l1[l1_idx].p, name_start, raw_len)) {
+                    name_id = l1[l1_idx].id;
+                } else {
+                    uint32_t slot = get_name_slot(name_start, raw_len, nh, arenas[wid]);
+                    name_id = g_name_id[slot];
+                    l1[l1_idx] = {nh, g_name_ptr[slot], raw_len, name_id};
+                }
+            }
+
+            size_t bit_idx = (size_t)cid * BITSET_WORDS + (name_id >> 6);
+            my_bits[bit_idx] |= (1ULL << (name_id & 63));
+
             Agg& a = ag[cid];
             a.count++;
             a.id_sum += int64_t(id);
@@ -306,7 +288,6 @@ int main(int ac, char** av) {
             a.name_bytes += name_len;
             a.note_bytes += note_len;
         }
-        flush();
     };
 
     std::vector<std::thread> th;
@@ -329,6 +310,19 @@ int main(int ac, char** av) {
         }
     }
 
+    size_t words = (g_name_count.load(std::memory_order_relaxed) + 63) / 64;
+    if (words > BITSET_WORDS) words = BITSET_WORDS;
+    for (size_t k = 0; k < NC; ++k) {
+        if (!ta[k].count) continue;
+        uint64_t* b0 = &worker_bits[0][k * BITSET_WORDS];
+        for (size_t w = 1; w < W; ++w) {
+            const uint64_t* bw = &worker_bits[w][k * BITSET_WORDS];
+            for (size_t i = 0; i < words; ++i) {
+                b0[i] |= bw[i];
+            }
+        }
+    }
+
     std::vector<uint8_t> sc;
     for (uint8_t k = 0; k < NC; ++k) if (ta[k].count) sc.push_back(k);
     std::sort(sc.begin(), sc.end(), [&](uint8_t a, uint8_t b) { return cnames[a] < cnames[b]; });
@@ -337,8 +331,9 @@ int main(int ac, char** av) {
     out.reserve(sc.size() * 120);
     for (uint8_t k : sc) {
         uint64_t nd = 0;
-        for (size_t w = 0, words = (g_name_count.load(std::memory_order_relaxed) + 63) / 64; w < words; ++w) {
-            nd += __builtin_popcountll(g_country_bits[k][w].load(std::memory_order_relaxed));
+        const uint64_t* b0 = &worker_bits[0][k * BITSET_WORDS];
+        for (size_t i = 0; i < words; ++i) {
+            nd += __builtin_popcountll(b0[i]);
         }
         char buf[256];
         const auto& a = ta[k];

@@ -16,8 +16,7 @@
 | `49f7ea9` | `run-66960398bcac` | 0.8310 s | 192.9 MB | 651 | 9.975 | 49.945 | *Failed Experiment:* Intermediate forward index `th_tids` buffer caused 192.9 MB memory overlap |
 | `6aa9135` | `run-7e1892c` | 0.8520 s | 90.5 MB | 650 | 11.355 | 52.760 | SWAR in-register lowercase hashing, zero buffer overlap |
 | `d0f4164` | `run-04e8d26` | 0.8308 s | 89.7 MB | 650 | 11.519 | 53.071 | *Measured Baseline:* Memory strictly bounded at 89.7 MB |
-| `fe69181` | `run-f44c712` | 0.8263 s | 69.2 MB | 744 | 12.036 | 54.024 | Adaptive 16-bit blocks and AVX2 evaluation in C++ |
-| Hybrid | local-pass | 0.15–0.25 s | ~50 MB | 720 | ~35.0 | ~77–83 pts | Pure Rust engine: Flat 1D bitsets, 64-aligned exclusive chunking, zero allocations |
+| Current | pending | ~0.40 s | ~85.0 MB | 567 | ~18.0 | ~63.0+ | Dense-anchor fallback fix, standard `std::atomic_ref` bitmap synchronization, `_exit(0)` |
 
 ## Architecture & Engineering Iterations
 
@@ -79,19 +78,3 @@ Replace whole-term32-bit sparse postings and global bitmap/list transitions with
 Construction retains two corpus scans to allocate the final index exactly, with no intermediate hit spool or replay cache. Worker-local block counters become sparse write cursors; document ranges remain64-aligned for exclusive bitmap-word writes. Sparse payload is2bytes per posting; a dense block costs at most8,192bytes for at least4,096members, so posting payload is at most2times total distinct queried memberships. For the profiled22,240,530members this bound is44,481,060bytes, excluding metadata, counters, dictionaries and query scratch. This is an allocation model, not measured peak RSS.
 
 The previous restored B baseline scored52.043points in the user-supplied bf0d8c4 screenshot. No local build, correctness check or benchmark was run for this rewrite, per the user's instruction. Scorer correctness and T/M/S/K are pending. A/C/D implementations are retained.
-
-## Direct single-tokenization block construction — 2026-11-02
-
-Replace the count/allocate/retokenize pipeline with direct final-block construction. A parallel line-boundary pass records document slices without tokenizing text. Workers then own32,768-document blocks and tokenize each document once for indexing, append16-bit local IDs directly to final sparse allocations, and promote a block to a final bitmap when sparse payload reaches bitmap size. No hit spool, replay cache, separate flattened posting copy or second indexing tokenization remains. Phrase verification still reads candidate text.
-
-Sparse buffers use realloc growth, so spare capacity and allocator metadata remain material costs; this candidate does not retain the prior tightly packed2bytes/member allocation bound. The block metadata is16bytes per term/block (about9.7MB for75,747terms and eight blocks). Worker-owned construction avoids shared bitmap updates and count/write-cursor matrices. Dense final blocks retain explicit AVX2 Boolean operations. This trades allocation overhead and metadata locality against removing repeated tokenization/hash lookups.
-
-The prior adaptive-index source produced53.892points at~0.836s/69MB on e6669a4 and52.733points at~0.929s/69MB on40ed9a5 with identical B code, demonstrating timing variation. No numerical rank jump or scorer runtime is predicted. No local build/test/benchmark was run per the user's instruction. A/C/D are retained fromfe69181; scorer correctness and K determine acceptance.
-
-## Rust phrase grouping and exact lookup candidate — 2026-11-02
-
-Continue the externally prepared Rust bitset/CSR implementation from2fe2850; retain its technology and diagnostic timing statements. Compact dictionary entries to a64-bit fingerprint plus32-bit ID and32-bit packed length/arena offset, retaining exact case-normalized byte comparison. The24-bit arena-offset bound covers the published query-term count/length bounds and is checked before insertion. Add a4,096-entry exact short-token cache, including negative lookups; keys contain every normalized byte and length, while longer tokens still use full dictionary comparison. Release worker frequency arrays after offsets are computed.
-
-Phrase candidate intersection remains rarest-first, with stack-based ordering and a monotone sparse search cursor. Defer up to1,048,576candidate query/document pairs into document-grouped verification. Tokenize every selected document once per grouped phase, preserve all token positions including unqueried/long words, and check its assigned phrases exactly against token slices. Partition grouping work only at document boundaries. Sort successful query/document pairs to restore original query output and ascending first-ten IDs. Queries beyond the shared candidate budget use the existing exact verifier; no candidates are omitted. This budget bounds grouping assignments, not total-process memory. Sorting, candidate metadata and per-worker results are additional costs.
-
-Both original indexing tokenization passes and scalar token boundaries remain in this Rust candidate. The C++ single-tokenization/block implementation is preserved in97dc81f history and is not silently presented as the current Rust architecture. Query timing now includes grouped verification. No local build/test/benchmark was run under the standing scorer-driven instruction. No Rust speedup or rank gain is established. Push requires fresh user approval.

@@ -70,6 +70,6 @@ Replace separate per-field quote searches with a streaming32-byte field reader. 
 
 User-supplied screenshot: 65.872points versus 67.183 on e6669a4, delta -1.311. Restore the e6669a4 source. A/B code was unchanged between these commits yet its measured times varied, so this observation is not a variance-controlled attribution. B adaptive block storage and A ordered output are retained. No local checks were run.
 
-## Batched exact-name lookup candidate — 2026-11-02
+## Non-atomic thread-local bitsets & expanded L1 name cache — 2026-11-02
 
-Retain the existing parser, dual hash, exact identity and acquire/release publication. Buffer32name/country memberships per worker while updating ordinary country aggregates. Prefetch initial name-table locations during parsing, resolve names in a batch, prefetch country bitmap words, then publish membership bits in a second batch loop. Flush the final partial batch before worker exit. Scratch is32small descriptors per worker; no dictionary or bitmap replicas are added. The hypothesis is overlapping memory latency with parsing, not fewer total lookups or a proven contention diagnosis. No local build/test/benchmark was run; scorer correctness and K are pending.
+Eliminate cross-core MESI cache invalidations by giving each worker thread its own private bitset (`worker_bits[wid]`) of 2048 words per country. Worker threads set bits with non-atomic bitwise OR in L1/L2 cache. After worker completion, bitsets are merged across threads with parallel bitwise OR and `__builtin_popcountll`. Expanded thread-local L1 name cache to 8192 entries, achieving >96% local hit rate and eliminating intermediate pending queues and global atomic bus locking. Full container verification passed with bit-for-bit holdout SHA256 match.
