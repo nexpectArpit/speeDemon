@@ -28,39 +28,37 @@ struct Agg {
     uint64_t name_bytes = 0, note_bytes = 0;
 };
 
-struct NameSlot {
-    std::atomic<uint64_t> hash{0};
-    const char* name = nullptr;
-    std::atomic<uint64_t> meta{0}; // Published length + 1 in high32, dense ID in low32.
-};
-alignas(64) static NameSlot g_names[G_SIZE];
+alignas(64) static std::atomic<uint64_t> g_hash_keys[G_SIZE];
+alignas(64) static const char* g_name_ptr[G_SIZE];
+alignas(64) static uint32_t g_name_id[G_SIZE];
 static std::atomic<uint32_t> g_name_count{0};
+alignas(64) static std::atomic<uint32_t> g_name_len[G_SIZE];
 alignas(64) static std::atomic<uint64_t> g_country_bits[MAX_COUNTRIES][BITSET_WORDS];
 static uint8_t r2c[1000000];
 
 inline uint64_t hash_bytes(const char* p, size_t len) {
 #if defined(__x86_64__) || defined(_M_X64)
-    uint64_t h1 = len;
+    uint64_t h1 = len ^ 0x9e3779b97f4a7c15ULL;
+    uint64_t h2 = len * 0xbf58476d1ce4e5b9ULL;
     size_t i = 0;
     for (; i + 8 <= len; i += 8) {
         uint64_t v;
         memcpy(&v, p + i, 8);
         h1 = _mm_crc32_u64(h1, v);
+        h2 = (h2 ^ v) * 0x94d049bb133111ebULL;
     }
-    if (i + 4 <= len) { uint32_t v; memcpy(&v, p + i, 4); h1 = _mm_crc32_u32(uint32_t(h1), v); i += 4; }
     for (; i < len; ++i) {
         uint8_t c = uint8_t(p[i]);
         h1 = _mm_crc32_u8(uint32_t(h1), c);
+        h2 = (h2 ^ c) * 0x94d049bb133111ebULL;
     }
-    return h1 ? h1 : 1ULL;
+    uint64_t res = (h1 << 32) ^ h2 ^ (len << 48);
+    return res ? res : 1ULL;
 #else
     uint64_t h = len ^ 0x9e3779b97f4a7c15ULL;
-    size_t i = 0;
-    for (; i + 8 <= len; i += 8) { uint64_t v; memcpy(&v, p + i, 8); h = (h ^ v) * 0xbf58476d1ce4e5b9ULL; }
-    for (; i < len; ++i) {
+    for (size_t i = 0; i < len; ++i) {
         h = (h ^ uint8_t(p[i])) * 0xbf58476d1ce4e5b9ULL;
     }
-    h = (h ^ (h >> 29)) * 0x94d049bb133111ebULL;
     return h ? h : 1ULL;
 #endif
 }
@@ -85,22 +83,21 @@ struct NameArena {
 inline uint32_t get_name_slot(const char* s, uint32_t len, uint64_t h, NameArena& arena) {
     uint32_t idx = uint32_t(h ^ (h >> 32)) & G_MASK;
     for (;;) {
-        auto& slot = g_names[idx];
-        uint64_t cur = slot.hash.load(std::memory_order_relaxed);
+        uint64_t cur = g_hash_keys[idx].load(std::memory_order_relaxed);
         if (!cur) {
             uint64_t expected = 0;
-            if (slot.hash.compare_exchange_strong(expected, h, std::memory_order_relaxed)) {
-                slot.name = arena.copy(s, len);
-                uint32_t id = g_name_count.fetch_add(1, std::memory_order_relaxed);
-                slot.meta.store((uint64_t(len + 1) << 32) | id, std::memory_order_release);
+            if (g_hash_keys[idx].compare_exchange_strong(expected, h, std::memory_order_relaxed)) {
+                g_name_ptr[idx] = arena.copy(s, len);
+                g_name_id[idx] = g_name_count.fetch_add(1, std::memory_order_relaxed);
+                g_name_len[idx].store(len + 1, std::memory_order_release);
                 return idx;
             }
             cur = expected;
         }
         if (cur == h) {
-            uint64_t ready;
-            while (!(ready = slot.meta.load(std::memory_order_acquire))) {}
-            if ((ready >> 32) == len + 1 && !memcmp(slot.name, s, len)) return idx;
+            uint32_t ready;
+            while (!(ready = g_name_len[idx].load(std::memory_order_acquire))) {}
+            if (ready == len + 1 && !memcmp(g_name_ptr[idx], s, len)) return idx;
         }
         idx = (idx + 1) & G_MASK;
     }
@@ -197,7 +194,7 @@ int main(int ac, char** av) {
     }
     std::vector<NameArena> arenas(W);
     uint32_t empty_slot = get_name_slot("", 0, hash_bytes("", 0), arenas[0]);
-    uint32_t empty_id = uint32_t(g_names[empty_slot].meta.load(std::memory_order_relaxed));
+    uint32_t empty_id = g_name_id[empty_slot];
     std::vector<std::vector<Agg>> sh(W, std::vector<Agg>(NC));
 
     auto worker = [&](size_t wid) {
@@ -232,8 +229,8 @@ int main(int ac, char** av) {
                         nid = l1[lidx].slot;
                     } else {
                         uint32_t slot = get_name_slot(name_start, raw_len, nh, arenas[wid]);
-                        nid = uint32_t(g_names[slot].meta.load(std::memory_order_relaxed));
-                        l1[lidx] = {nh, g_names[slot].name, raw_len, nid};
+                        nid = g_name_id[slot];
+                        l1[lidx] = {nh, g_name_ptr[slot], raw_len, nid};
                     }
                 }
                 c += 2; // skip '"' and ','

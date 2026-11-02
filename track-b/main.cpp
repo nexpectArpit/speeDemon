@@ -279,7 +279,6 @@ int main(int ac, char** av) {
     }
 
     std::vector<std::vector<uint32_t>> th_df(W, std::vector<uint32_t>(NT, 0));
-    std::vector<std::vector<uint64_t>> th_hits(W);
 
     par(W, [&](size_t wid) {
         const char* sc = bn[wid], * end = bn[wid + 1];
@@ -304,7 +303,6 @@ int main(int ac, char** av) {
                     if (tid != ~0u && last_doc[tid] != id) {
                         last_doc[tid] = id;
                         l_df[tid]++;
-                        th_hits[wid].push_back((uint64_t(tid) << 32) | id);
                     }
                 }
                         });
@@ -346,15 +344,30 @@ int main(int ac, char** av) {
     std::vector<uint32_t> all_postings(total_array_postings);
 
     par(W, [&](size_t wid) {
+        const char* sc = bn[wid], * end = bn[wid + 1];
         auto& l_off = th_off[wid];
-        auto& hits = th_hits[wid];
-        for (uint64_t hit : hits) {
-            uint32_t tid = uint32_t(hit >> 32), id = uint32_t(hit);
-            uint32_t bs_id = bitset_map[tid];
-            if (bs_id != ~0u) bitsets[bs_id][id >> 6] |= 1ULL << (id & 63);
-            else all_postings[l_off[tid]++] = id;
+        std::vector<uint32_t> last_doc(NT, ~0u);
+        TokenCache cache;
+
+        while (sc < end) {
+            uint32_t id = 0;
+            while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
+            sc = dr[id].p + dr[id].l + 1;
+            for_each_token(dr[id].p, dr[id].p + dr[id].l, [&](const char* tok_st, size_t tl) {
+                if (tl <= 32) {
+                    uint32_t tid = cache.lookup(dt, dp, tok_st, tl);
+                    if (tid != ~0u && last_doc[tid] != id) {
+                        last_doc[tid] = id;
+                        uint32_t bs_id = bitset_map[tid];
+                        if (bs_id != ~0u) {
+                            bitsets[bs_id][id >> 6] |= 1ULL << (id & 63);
+                        } else {
+                            all_postings[l_off[tid]++] = id;
+                        }
+                    }
+                }
+                        });
         }
-        std::vector<uint64_t>().swap(hits);
     });
     std::vector<std::vector<uint32_t>>().swap(th_off);
 

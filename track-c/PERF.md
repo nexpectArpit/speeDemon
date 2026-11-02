@@ -49,3 +49,7 @@ Independent verification reproduces both old defects and passes58 participant ex
 ## Combined scorer candidate — 2026-11-02
 
 Place each name's hash, byte pointer and published length/ID together in a24-byte slot to reduce scattered reads. Publish length+1 and dense ID with one release-store; readers acquire before comparing exact bytes. Simplify x86 name hashing to CRC32 with8/4/1-byte loads and use8-byte blocks in the portable fallback. Hash collisions still require exact length and byte equality. These are code changes, not measured performance gains. Local builds, tests and benchmarks were explicitly skipped at the user's request; evaluation is pending.
+
+## Restore prior exact lookup — 2026-11-02
+
+User-supplied board results for d1865fc: T≈0.085s, M≈19.0MB, S412,64.259points. Restore the exact-name dictionary layout and dual CRC/multiplicative hash from1dcbdb5, including persistent arenas, acquire/release publication and dense name IDs. This reverts both experimental changes together; the supplied timing does not isolate hashing, layout or contention as the cause. The restored version scored67.213points in the supplied1dcbdb5 snapshot. The70.200point historical implementation had a reproduced race and is not restored. No new local execution was run, as requested.
