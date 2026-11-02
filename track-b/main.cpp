@@ -293,8 +293,7 @@ int main(int ac, char** av) {
                         last_doc[tid] = id;
                         uint32_t bs_id = bitset_map[tid];
                         if (bs_id != ~0u) {
-                            auto* word = (std::atomic<uint64_t>*)&bitsets[bs_id][id >> 6];
-                            word->fetch_or(1ULL << (id & 63), std::memory_order_relaxed);
+                            std::atomic_ref<uint64_t>(bitsets[bs_id][id >> 6]).fetch_or(1ULL << (id & 63), std::memory_order_relaxed);
                         } else {
                             all_postings[l_off[tid]++] = id;
                         }
@@ -479,8 +478,22 @@ int main(int ac, char** av) {
                     return df_cnt[ts[a]] < df_cnt[ts[b]];
                 });
 
-                auto [first_p, first_sz] = get_pos(ts[ord[0]]);
-                cur.assign(first_p, first_p + first_sz);
+                uint32_t rarest_t = ts[ord[0]];
+                uint32_t bsi0 = bitset_map[rarest_t];
+                if (bsi0 != ~0u) {
+                    cur.clear();
+                    const uint64_t* tb = bitsets[bsi0].data();
+                    for (size_t w = 0; w < NW; ++w) {
+                        uint64_t wrd = tb[w];
+                        while (wrd) {
+                            cur.push_back(uint32_t(w * 64 + __builtin_ctzll(wrd)));
+                            wrd &= wrd - 1;
+                        }
+                    }
+                } else {
+                    auto [first_p, first_sz] = get_pos(rarest_t);
+                    cur.assign(first_p, first_p + first_sz);
+                }
 
                 for (size_t idx = 1; idx < K && !cur.empty(); ++idx) {
                     uint32_t ti = ts[ord[idx]];

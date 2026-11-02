@@ -28,6 +28,8 @@ struct Agg {
 };
 
 alignas(64) static std::atomic<uint64_t> g_hash_keys[G_SIZE];
+alignas(64) static std::atomic<const char*> g_name_ptr[G_SIZE];
+alignas(64) static std::atomic<uint32_t> g_name_len[G_SIZE];
 alignas(64) static std::atomic<uint64_t> g_country_bits[MAX_COUNTRIES][BITSET_WORDS];
 static uint8_t r2c[1000000];
 
@@ -58,17 +60,30 @@ inline uint64_t hash_bytes(const char* p, size_t len) {
 #endif
 }
 
-inline uint32_t get_name_slot(uint64_t h) {
+inline uint32_t get_name_slot(const char* s, uint32_t len, uint64_t h) {
     uint32_t idx = uint32_t(h ^ (h >> 32)) & G_MASK;
     while (true) {
         uint64_t cur = g_hash_keys[idx].load(std::memory_order_relaxed);
-        if (cur == h) return idx;
-        if (cur == 0) {
+        if (cur == h) {
+            uint32_t slen = g_name_len[idx].load(std::memory_order_acquire);
+            if (slen == len) {
+                const char* sp = g_name_ptr[idx].load(std::memory_order_relaxed);
+                if (!memcmp(sp, s, len)) return idx;
+            }
+        } else if (cur == 0) {
             uint64_t expected = 0;
             if (g_hash_keys[idx].compare_exchange_strong(expected, h, std::memory_order_relaxed)) {
+                g_name_ptr[idx].store(s, std::memory_order_relaxed);
+                g_name_len[idx].store(len, std::memory_order_release);
                 return idx;
             }
-            if (expected == h) return idx;
+            if (expected == h) {
+                uint32_t slen = g_name_len[idx].load(std::memory_order_acquire);
+                if (slen == len) {
+                    const char* sp = g_name_ptr[idx].load(std::memory_order_relaxed);
+                    if (!memcmp(sp, s, len)) return idx;
+                }
+            }
         }
         idx = (idx + 1) & G_MASK;
     }
@@ -175,12 +190,12 @@ int main(int ac, char** av) {
     }
     for (size_t i = 1; i < W; ++i) if (bn[i] < bn[i - 1]) bn[i] = bn[i - 1];
 
-    uint32_t empty_slot = get_name_slot(hash_bytes("", 0));
+    uint32_t empty_slot = get_name_slot("", 0, hash_bytes("", 0));
     std::vector<std::vector<Agg>> sh(W, std::vector<Agg>(NC));
 
     auto worker = [&](size_t wid) {
         auto& ag = sh[wid];
-        struct L1Entry { uint64_t hash; uint32_t slot; };
+        struct L1Entry { uint64_t hash = 0; const char* p = nullptr; uint32_t len = 0; uint32_t slot = 0; };
         L1Entry l1[4096]{};
         const char* c = bn[wid];
         const char* end = bn[wid + 1];
@@ -206,11 +221,11 @@ int main(int ac, char** av) {
                 if (raw_len > 0) {
                     uint64_t nh = hash_bytes(name_start, raw_len);
                     uint32_t lidx = uint32_t(nh ^ (nh >> 12)) & 4095;
-                    if (l1[lidx].hash == nh) {
+                    if (l1[lidx].hash == nh && l1[lidx].len == raw_len && !memcmp(l1[lidx].p, name_start, raw_len)) {
                         nid = l1[lidx].slot;
                     } else {
-                        nid = get_name_slot(nh);
-                        l1[lidx] = {nh, nid};
+                        nid = get_name_slot(name_start, raw_len, nh);
+                        l1[lidx] = {nh, name_start, raw_len, nid};
                     }
                 }
                 c += 2; // skip '"' and ','

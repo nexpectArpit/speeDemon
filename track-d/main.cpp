@@ -92,7 +92,7 @@ struct DS {
         return INF;
     }
     void clear() {
-        if (tb.size() > 65536) { tb.assign(65536, Slot{}); us.clear(); return; }
+        if (tb.size() > 65536) { std::vector<Slot>(4096).swap(tb); us.clear(); return; }
         for (uint32_t x : us) tb[x] = Slot{};
         us.clear();
     }
@@ -134,8 +134,6 @@ int main(int ac, char** av) {
     }
 
     std::vector<uint32_t> fo(n + 1, 0), ro(n + 1, 0);
-    auto* afo = reinterpret_cast<std::atomic<uint32_t>*>(fo.data());
-    auto* aro = reinterpret_cast<std::atomic<uint32_t>*>(ro.data());
     par(W, [&](size_t w) {
         const char* sc = bn[w], *lim = bn[w + 1];
         while (sc < lim) {
@@ -143,8 +141,8 @@ int main(int ac, char** av) {
             uint32_t u = pu(sc, lim); ++sc; uint32_t v = pu(sc, lim);
             while (sc < lim && *sc != '\n') ++sc;
             if (sc < lim) ++sc;
-            afo[u].fetch_add(1, std::memory_order_relaxed);
-            aro[v].fetch_add(1, std::memory_order_relaxed);
+            std::atomic_ref<uint32_t>(fo[u]).fetch_add(1, std::memory_order_relaxed);
+            std::atomic_ref<uint32_t>(ro[v]).fetch_add(1, std::memory_order_relaxed);
         }
     });
 
@@ -155,8 +153,6 @@ int main(int ac, char** av) {
         sf += df; sr += dr;
     }
     std::vector<uint32_t> fc = fo, rc = ro;
-    auto* afc = reinterpret_cast<std::atomic<uint32_t>*>(fc.data());
-    auto* arc = reinterpret_cast<std::atomic<uint32_t>*>(rc.data());
 
     std::vector<Edge> fe(m), re(m);
     par(W, [&](size_t w) {
@@ -166,8 +162,8 @@ int main(int ac, char** av) {
             uint32_t u = pu(sc, lim); ++sc; uint32_t v = pu(sc, lim); ++sc; uint32_t wt = pu(sc, lim);
             while (sc < lim && *sc != '\n') ++sc;
             if (sc < lim) ++sc;
-            fe[afc[u].fetch_add(1, std::memory_order_relaxed)] = {v, wt};
-            re[arc[v].fetch_add(1, std::memory_order_relaxed)] = {u, wt};
+            fe[std::atomic_ref<uint32_t>(fc[u]).fetch_add(1, std::memory_order_relaxed)] = {v, wt};
+            re[std::atomic_ref<uint32_t>(rc[v]).fetch_add(1, std::memory_order_relaxed)] = {u, wt};
         }
     });
     std::vector<uint32_t>().swap(fc);

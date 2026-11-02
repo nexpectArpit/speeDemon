@@ -73,6 +73,12 @@ struct GlobalEndpointDict {
     }
 } g_dict;
 
+struct Rec {
+    uint32_t lat;
+    uint16_t ep;
+    uint8_t h, err;
+};
+
 int main(int ac, char** av) {
     const char* dd = ac == 3 ? av[1] : "/data", *od = ac == 3 ? av[2] : "/out";
     int fd = open((std::string(dd) + "/requests.log").c_str(), O_RDONLY);
@@ -95,11 +101,13 @@ int main(int ac, char** av) {
         bn[i] = p;
     }
 
-    std::vector<std::atomic<uint32_t>> bucket_cnt(H * MAX_EP), bucket_err(H * MAX_EP);
+    std::vector<std::vector<Rec>> th_recs(W);
     std::vector<std::thread> th;
 
     for (size_t w = 0; w < W; ++w) {
         th.emplace_back([&, w]() {
+            th_recs[w].reserve(sz / W / 70);
+            auto& recs = th_recs[w];
             const char* c = bn[w], *e = bn[w + 1];
             struct L1EP { const char* p = nullptr; uint16_t l = 0, id = 0; } l1[2048]{};
             while (c < e) {
@@ -115,9 +123,10 @@ int main(int ac, char** av) {
                 if (l1[l1_idx].l == el && !memcmp(l1[l1_idx].p, es, el)) ei = l1[l1_idx].id;
                 else { ei = g_dict.get_or_insert(es, el); l1[l1_idx] = {es, el, ei}; }
                 c = sp + 1; bool is_err = (c[0] == '5'); c += 4;
-                const char* nl = (const char*)memchr(c, '\n', 32); c = nl ? nl + 1 : e;
-                bucket_cnt[h * MAX_EP + ei].fetch_add(1, std::memory_order_relaxed);
-                if (is_err) bucket_err[h * MAX_EP + ei].fetch_add(1, std::memory_order_relaxed);
+                uint32_t lat = 0;
+                while (*c != '\n') { lat = lat * 10 + uint32_t(*c - '0'); ++c; }
+                ++c;
+                recs.push_back({lat, ei, uint8_t(h), uint8_t(is_err)});
             }
         });
     }
@@ -130,57 +139,38 @@ int main(int ac, char** av) {
     std::sort(sorted_order.begin(), sorted_order.end(), [&](uint16_t a, uint16_t b) {
         return g_dict.ep_strings[a] < g_dict.ep_strings[b];
     });
-
     std::vector<uint16_t> old_to_sorted(num_ep);
     for (uint16_t i = 0; i < num_ep; ++i) old_to_sorted[sorted_order[i]] = i;
 
     std::vector<uint32_t> sorted_cnt(H * num_ep, 0), sorted_err(H * num_ep, 0);
-    for (size_t h = 0; h < H; ++h) {
-        for (uint16_t old_id = 0; old_id < num_ep; ++old_id) {
-            uint32_t c = bucket_cnt[h * MAX_EP + old_id].load(std::memory_order_relaxed);
-            if (c) sorted_cnt[h * num_ep + old_to_sorted[old_id]] = c;
-            uint32_t er = bucket_err[h * MAX_EP + old_id].load(std::memory_order_relaxed);
-            if (er) sorted_err[h * num_ep + old_to_sorted[old_id]] = er;
+    for (size_t w = 0; w < W; ++w) {
+        for (const auto& r : th_recs[w]) {
+            uint16_t s_id = old_to_sorted[r.ep];
+            size_t idx = size_t(r.h) * num_ep + s_id;
+            sorted_cnt[idx]++;
+            if (r.err) sorted_err[idx]++;
         }
     }
 
     std::vector<uint32_t> bucket_start(H * num_ep + 1, 0);
-    std::vector<std::atomic<uint32_t>> write_pos(H * num_ep);
+    std::vector<uint32_t> write_pos(H * num_ep);
     uint32_t total_recs = 0;
     for (size_t i = 0; i < H * num_ep; ++i) {
         bucket_start[i] = total_recs;
-        write_pos[i].store(total_recs, std::memory_order_relaxed);
+        write_pos[i] = total_recs;
         total_recs += sorted_cnt[i];
     }
     bucket_start[H * num_ep] = total_recs;
+
     std::vector<uint32_t> all_lat(total_recs);
-
     for (size_t w = 0; w < W; ++w) {
-        th.emplace_back([&, w]() {
-            const char* c = bn[w], *e = bn[w + 1];
-            struct L1Sorted { const char* p = nullptr; uint16_t l = 0, sorted_id = 0; } l1[2048]{};
-            while (c < e) {
-                size_t h = hi(c); c += 28;
-                if (c[0] == 'G' || (c[0] == 'P' && c[1] == 'U')) c += 4;
-                else if (c[0] == 'H' || (c[0] == 'P' && c[1] == 'O')) c += 5;
-                else if (c[0] == 'P') c += 6;
-                else if (c[0] == 'D') c += 7;
-                else c += 8;
-
-                const char* es = c, *sp = (const char*)memchr(es, ' ', 128);
-                uint16_t el = uint16_t(sp - es), l1_idx = uint16_t((uint8_t(es[0]) * 31 + el * 7 + uint8_t(es[el - 1])) & 2047), s_id;
-                if (l1[l1_idx].l == el && !memcmp(l1[l1_idx].p, es, el)) s_id = l1[l1_idx].sorted_id;
-                else { s_id = old_to_sorted[g_dict.get_or_insert(es, el)]; l1[l1_idx] = {es, el, s_id}; }
-                c = sp + 5; uint32_t lat = 0;
-                while (*c != '\n') { lat = lat * 10 + uint32_t(*c - '0'); ++c; }
-                ++c;
-                uint32_t pos = write_pos[h * num_ep + s_id].fetch_add(1, std::memory_order_relaxed);
-                all_lat[pos] = lat;
-            }
-        });
+        for (const auto& r : th_recs[w]) {
+            uint16_t s_id = old_to_sorted[r.ep];
+            size_t idx = size_t(r.h) * num_ep + s_id;
+            all_lat[write_pos[idx]++] = r.lat;
+        }
     }
-    for (auto& t : th) t.join();
-    th.clear();
+    std::vector<std::vector<Rec>>().swap(th_recs);
 
     std::array<std::string, H> gh;
     {

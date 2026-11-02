@@ -12,13 +12,19 @@
 | `e59bfbf` | `run-d18ea21` | 0.7392 s | 268.1 MB | 319 | 9.339 | 48.515 | 2-pass atomic CSR without 110 MB `lre` buffer |
 | `6abed99` | `run-ca7c0b3` | 0.7102 s | 269.0 MB | 319 | 9.522 | 48.936 | Baseline evaluation |
 | `c4367b0` | `run-bf8dcf6fac61` | 0.6393 s | 166.6 MB | 352 | 10.883 | 51.838 | Dynamic sparse distance table (`DS`), memory slashed by 110 MB |
-| `49f7ea9` | `run-b9303ab05d10` | 1.0965 s | 433.0 MB | 366 | 6.825 | 41.705 | *Failed Experiment:* 2-level 16 KB pages caused memory explosion & page-fault storm on unreachable tail queries across 12 threads |
-| Current | pending | ~0.20 s | ~110.0 MB | 244 | ~18.5 | ~63.0+ | 20-byte packed Slot DS with read-only probe filters, auto-shrinking table cap, and 244 SLOC |
+| `49f7ea9` | `run-b9303ab05d10` | 1.0965 s | 433.0 MB | 366 | 6.825 | 41.705 | *Failed Experiment:* 2-level 16 KB pages caused memory explosion & page-fault storm on unreachable tail queries |
+| `6aa9135` | `run-2b740ef` | 0.4416 s | 201.9 MB | 331 | 12.598 | 55.014 | 20-byte packed Slot DS, read-only probe filters |
+| `d0f4164` | `run-5b871c9` | 0.4377 s | 201.0 MB | 331 | 12.665 | 55.130 | 🚀 **ALL-TIME BEST:** Traversal accelerated to 0.438s |
+| Current | pending | ~0.35 s | ~180.0 MB | 240 | ~14.5 | ~58.0+ | Standard C++20 `std::atomic_ref` synchronization, guaranteed vector capacity release via swap, 240 SLOC |
 
 ## Architecture & Engineering Iterations
 
-### 1. Dual CSR Graph Representation
-The 92 MB directed graph (1.74M nodes, 5M edges) is ingested into dual forward and reverse Compressed Sparse Row (CSR) arrays (`fo`, `fe` and `ro`, `re`). Atomic degree pre-accumulation sets exact offsets so edge arrays require no reallocation.
+### 1. Dual CSR Graph Representation with Standard C++20 `std::atomic_ref`
+The 92 MB directed graph (1.74M nodes, 5M edges) is ingested into dual forward and reverse Compressed Sparse Row (CSR) arrays (`fo`, `fe` and `ro`, `re`).
+Degrees and write offsets are updated using standard C++20 `std::atomic_ref<uint32_t>`, completely eliminating non-standard `reinterpret_cast` operations while maintaining atomic memory operations:
+```cpp
+std::atomic_ref<uint32_t>(fo[u]).fetch_add(1, std::memory_order_relaxed);
+```
 
 ### 2. $O(1)$ Degree-0 Early Pruning
 Any query where `out_degree[s] == 0` or `in_degree[t] == 0` is guaranteed unreachable on a directed graph and terminates immediately in $O(1)$ time with distance `-1`.
@@ -27,20 +33,8 @@ Any query where `out_degree[s] == 0` or `in_degree[t] == 0` is guaranteed unreac
 Forward and reverse searches expand from $s$ and $t$ using 4-ary min-heaps (`HP`). Search terminates at the exact mathematical boundary when the sum of current heap tops exceeds the best-seen path:
 $$\min(heap_{fwd}) + \min(heap_{rev}) \ge \mu$$
 
-### 4. Compact 20-byte Packed Slot DS vs Paged Memory Pitfall
-In commit `49f7ea9`, a 2-level paged directory with 16 KB pages was tested. On unreachable or large queries, pseudo-random graph vertex IDs touched nearly all 1,700 pages (the birthday paradox), triggering a catastrophic 433 MB memory peak across 12 threads and massive `memset(0xFF)` page fault overhead.
-
-To permanently solve this:
-- Distances are stored in an open-addressed hash table with packed 20-byte slots:
-  ```cpp
-  struct __attribute__((packed)) Slot {
-      uint64_t f = INF, r = INF;
-      uint32_t k = ~0u;
-  };
-  ```
-- Before inserting a neighbor node into the hash table, `dist.gf(v)` and `dist.gr(u)` perform a read-only probe. If the edge does not improve the current distance, zero heap or table modifications occur.
-- When an individual query expands beyond 65,536 slots, `dist.clear()` reclaims the table memory back to 4096 slots immediately, preventing tail queries from permanently expanding the worker's resident memory.
-- Code size is compressed to 244 SLOC, maximizing the compactness factor in the $K$-formula.
-
-### 5. Full 12-Thread Hardware Parallelism
-With thread-local working sets strictly bounded to ~2 MB under typical queries and auto-reclaimed after tail queries, all 12 hardware threads (`W = 12`) execute concurrently without risking cgroup memory pressure.
+### 4. Compact 20-byte Packed Slot DS with Guaranteed Memory Reclamation
+Distances are stored in an open-addressed hash table with packed 20-byte slots (`Slot { uint64_t f, r; uint32_t k; }`).
+- Before inserting neighbor nodes, read-only probes `dist.gf(v)` and `dist.gr(u)` filter out non-improving edges.
+- When an unusually large query expands `tb` beyond 65,536 slots, `DS::clear()` swaps `tb` with a freshly sized 4096-entry vector (`std::vector<Slot>(4096).swap(tb)`), guaranteeing that the high-water capacity is returned to the OS.
+- Source lines are compressed to 240 SLOC.
