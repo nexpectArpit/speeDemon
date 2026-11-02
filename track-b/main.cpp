@@ -5,12 +5,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -207,6 +209,35 @@ struct QItem {
 
 struct DocRef { const char* p; uint32_t l; };
 
+struct PostingBlock {
+    void* data = nullptr;
+    uint32_t count = 0, capacity = 0;
+    bool bitmap() const { return capacity == ~0u; }
+    const uint16_t* small() const { return (const uint16_t*)data; }
+    const uint64_t* bits() const { return (const uint64_t*)data; }
+    void add(uint16_t doc, uint32_t words) {
+        if (bitmap()) ((uint64_t*)data)[doc >> 6] |= 1ULL << (doc & 63);
+        else if (count + 1 >= words * 4) {
+            auto* bits = (uint64_t*)calloc(words, sizeof(uint64_t));
+            if (!bits) _exit(1);
+            const auto* old = small();
+            for (uint32_t i = 0; i < count; ++i) bits[old[i] >> 6] |= 1ULL << (old[i] & 63);
+            bits[doc >> 6] |= 1ULL << (doc & 63);
+            free(data); data = bits; capacity = ~0u;
+        } else {
+            if (count == capacity) {
+                uint32_t next = std::min<uint32_t>(capacity ? capacity * 2 : 8, words * 4);
+                void* grown = realloc(data, size_t(next) * sizeof(uint16_t));
+                if (!grown) _exit(1);
+                data = grown; capacity = next;
+            }
+            ((uint16_t*)data)[count] = doc;
+        }
+        ++count;
+    }
+};
+
+
 template<class F> void par(size_t W, F f) {
     std::vector<std::thread> th;
     for (size_t i = 1; i < W; ++i) th.emplace_back(f, i);
@@ -298,104 +329,53 @@ int main(int ac, char** av) {
         bn[i] = p;
     }
 
-    static constexpr uint32_t BLOCK_SHIFT = 16, DENSE = 4096;
-    size_t NB = (size_t(ND) + 65535) >> BLOCK_SHIFT;
-    struct PostingBlock { uint32_t offset = 0, count = 0; };
-    std::vector<PostingBlock> blocks(NT * NB);
-    std::vector<uint32_t> first_block(W), span(W);
-    std::vector<std::vector<uint32_t>> offsets(W);
-    auto first_doc = [&](const char* p) {
-        if (p == de) return ND;
-        uint32_t id = 0;
-        while (p < de && *p >= '0' && *p <= '9') id = id * 10 + (*p++ - '0');
-        return id;
-    };
-    for (size_t w = 0; w < W; ++w) {
-        uint32_t first = first_doc(bn[w]), last = first_doc(bn[w + 1]);
-        first_block[w] = first >> BLOCK_SHIFT;
-        span[w] = last > first ? ((last - 1) >> BLOCK_SHIFT) - first_block[w] + 1 : 0;
-        offsets[w].resize(NT * span[w]);
-    }
+    static constexpr uint32_t BLOCK_SHIFT = 15, DENSE = 2048;
+    static constexpr size_t BLOCK_DOCS = size_t(1) << BLOCK_SHIFT;
+    static constexpr size_t BLOCK_WORDS = BLOCK_DOCS / 64;
+    size_t NB = (size_t(ND) + BLOCK_DOCS - 1) >> BLOCK_SHIFT;
     par(W, [&](size_t wid) {
         const char* sc = bn[wid], *end = bn[wid + 1];
-        auto& counts = offsets[wid];
-        std::vector<uint32_t> last_doc(NT, ~0u);
-        TokenCache cache;
         while (sc < end) {
             uint32_t id = 0;
             while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
             ++sc;
-            const char* ts = sc;
+            const char* text = sc;
             const char* nl = (const char*)memchr(sc, '\n', end - sc);
             if (!nl) nl = end;
-            dr[id] = {ts, uint32_t(nl - ts)};
+            dr[id] = {text, uint32_t(nl - text)};
             sc = nl < end ? nl + 1 : end;
-            size_t base = size_t((id >> BLOCK_SHIFT) - first_block[wid]) * NT;
-            for_each_token(ts, nl, [&](const char* token, size_t length) {
-                if (length > 32) return;
-                uint32_t tid = cache.lookup(dt, dp, token, length);
-                if (tid != ~0u && last_doc[tid] != id) {
-                    last_doc[tid] = id;
-                    ++counts[base + tid];
-                }
-            });
+        }
+    });
+    std::vector<PostingBlock> blocks(NT * NB);
+    std::atomic<size_t> next_block{0};
+    par(W, [&](size_t) {
+        std::vector<uint32_t> last_doc(NT, ~0u);
+        TokenCache cache;
+        for (size_t b = next_block.fetch_add(1); b < NB; b = next_block.fetch_add(1)) {
+            uint32_t base = uint32_t(b << BLOCK_SHIFT);
+            uint32_t end = uint32_t(std::min<size_t>(ND, size_t(base) + BLOCK_DOCS));
+            uint32_t words = (end - base + 63) / 64;
+            PostingBlock* local = blocks.data() + b * NT;
+            for (uint32_t id = base; id < end; ++id) {
+                const auto& doc = dr[id];
+                for_each_token(doc.p, doc.p + doc.l, [&](const char* token, size_t length) {
+                    if (length > 32) return;
+                    uint32_t term = cache.lookup(dt, dp, token, length);
+                    if (term == ~0u || last_doc[term] == id) return;
+                    last_doc[term] = id;
+                    local[term].add(uint16_t(id - base), words);
+                });
+            }
         }
     });
     std::vector<uint32_t> df_cnt(NT);
-    uint32_t sparse_size = 0, dense_size = 0;
-    for (size_t b = 0; b < NB; ++b) {
-        uint32_t words = uint32_t(std::min<size_t>(1024, NW - b * 1024));
-        for (size_t t = 0; t < NT; ++t) {
-            auto& block = blocks[t * NB + b];
-            for (size_t w = 0; w < W; ++w)
-                if (b >= first_block[w] && b - first_block[w] < span[w])
-                    block.count += offsets[w][(b - first_block[w]) * NT + t];
-            df_cnt[t] += block.count;
-            block.offset = block.count >= DENSE ? dense_size : sparse_size;
-            if (block.count >= DENSE) dense_size += words;
-            else sparse_size += block.count;
-            uint32_t cursor = block.offset;
-            for (size_t w = 0; w < W; ++w) {
-                if (b < first_block[w] || b - first_block[w] >= span[w]) continue;
-                auto& count = offsets[w][(b - first_block[w]) * NT + t];
-                uint32_t old = count;
-                count = cursor;
-                if (block.count < DENSE) cursor += old;
-            }
-        }
-    }
-    std::vector<uint16_t> sparse(sparse_size);
-    std::vector<uint64_t> dense(dense_size);
-    par(W, [&](size_t wid) {
-        const char* sc = bn[wid], *end = bn[wid + 1];
-        auto& cursor = offsets[wid];
-        std::vector<uint32_t> last_doc(NT, ~0u);
-        TokenCache cache;
-        while (sc < end) {
-            uint32_t id = 0;
-            while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
-            const auto& doc = dr[id];
-            sc = doc.p + doc.l;
-            if (sc < end) ++sc;
-            uint32_t b = id >> BLOCK_SHIFT;
-            size_t base = size_t(b - first_block[wid]) * NT;
-            for_each_token(doc.p, doc.p + doc.l, [&](const char* token, size_t length) {
-                if (length > 32) return;
-                uint32_t tid = cache.lookup(dt, dp, token, length);
-                if (tid == ~0u || last_doc[tid] == id) return;
-                last_doc[tid] = id;
-                const auto& block = blocks[size_t(tid) * NB + b];
-                if (block.count >= DENSE) dense[block.offset + ((id & 65535) >> 6)] |= 1ULL << (id & 63);
-                else sparse[cursor[base + tid]++] = uint16_t(id);
-            });
-        }
-    });
-    std::vector<std::vector<uint32_t>>().swap(offsets);
+    for (size_t b = 0; b < NB; ++b)
+        for (size_t t = 0; t < NT; ++t) df_cnt[t] += blocks[b * NT + t].count;
     const PostingBlock empty{};
     uint16_t zero = 0;
-    const uint16_t* sparse_base = sparse.empty() ? &zero : sparse.data();
+    auto get_sparse = [&](const PostingBlock& block) { return block.data ? block.small() : &zero; };
     auto get_block = [&](uint32_t term, size_t b) -> const PostingBlock& {
-        return term == ~0u ? empty : blocks[size_t(term) * NB + b];
+        return term == ~0u ? empty : blocks[b * NT + term];
     };
     auto phrase_matches = [&](uint32_t doc, const QItem& query) {
         const auto& words = query.rw;
@@ -424,7 +404,7 @@ int main(int ac, char** av) {
     std::vector<std::vector<uint64_t>> phrase_candidates(W), phrase_hits(W);
     std::atomic<size_t> qc{0};
     par(W, [&](size_t wid) {
-        std::vector<uint64_t> cb(1024);
+        std::vector<uint64_t> cb(BLOCK_WORDS);
         std::vector<uint16_t> cur, nxt;
         std::vector<uint32_t> qdocs;
         cur.reserve(DENSE); nxt.reserve(DENSE);
@@ -461,12 +441,12 @@ int main(int ac, char** av) {
             }
             for (size_t b = 0; b < NB && !absent; ++b) {
                 uint32_t base = uint32_t(b << BLOCK_SHIFT);
-                size_t words = std::min<size_t>(1024, NW - b * 1024);
+                size_t words = std::min<size_t>(BLOCK_WORDS, NW - b * BLOCK_WORDS);
                 const auto& initial = get_block(query.t[query.ph ? order[0] : 0], b);
-                bool bitmap = initial.count >= DENSE;
+                bool bitmap = initial.bitmap();
                 cur.clear();
-                if (bitmap) std::memcpy(cb.data(), dense.data() + initial.offset, words * 8);
-                else if (initial.count) cur.assign(sparse_base + initial.offset, sparse_base + initial.offset + initial.count);
+                if (bitmap) std::memcpy(cb.data(), initial.bits(), words * 8);
+                else if (initial.count) cur.assign(get_sparse(initial), get_sparse(initial) + initial.count);
                 if (query.ph) {
                     if (bitmap) {
                         for (size_t w = 0; w < words; ++w) {
@@ -478,11 +458,11 @@ int main(int ac, char** av) {
                         const auto& operand = get_block(query.t[order[i]], b);
                         if (!operand.count) { cur.clear(); break; }
                         size_t out = 0;
-                        if (operand.count >= DENSE) {
-                            const uint64_t* bits = dense.data() + operand.offset;
+                        if (operand.bitmap()) {
+                            const uint64_t* bits = operand.bits();
                             for (uint16_t doc : cur) if ((bits[doc >> 6] >> (doc & 63)) & 1) cur[out++] = doc;
                         } else {
-                            const uint16_t* p = sparse_base + operand.offset, *end = p + operand.count;
+                            const uint16_t* p = get_sparse(operand), *end = p + operand.count;
                             for (uint16_t doc : cur) {
                                 p = std::lower_bound(p, end, doc);
                                 if (p == end) break;
@@ -497,8 +477,8 @@ int main(int ac, char** av) {
                 for (size_t i = 0; i < query.op.size(); ++i) {
                     Op op = query.op[i];
                     const auto& operand = get_block(query.t[i + 1], b);
-                    if (operand.count >= DENSE) {
-                        const uint64_t* bits = dense.data() + operand.offset;
+                    if (operand.bitmap()) {
+                        const uint64_t* bits = operand.bits();
                         if (bitmap) {
                             if (op == Op::AND) apply_words<Op::AND>(cb.data(), bits, words);
                             else if (op == Op::OR) apply_words<Op::OR>(cb.data(), bits, words);
@@ -517,7 +497,7 @@ int main(int ac, char** av) {
                         }
                         continue;
                     }
-                    const uint16_t* p = sparse_base + operand.offset;
+                    const uint16_t* p = get_sparse(operand);
                     size_t size = operand.count;
                     if (!bitmap && op == Op::OR && cur.size() + size > DENSE) {
                         std::fill(cb.begin(), cb.begin() + words, 0);
@@ -589,7 +569,7 @@ int main(int ac, char** av) {
         std::vector<uint64_t> candidates;
         candidates.reserve(nc);
         for (auto& v : phrase_candidates) candidates.insert(candidates.end(), v.begin(), v.end());
-        std::sort(candidates.begin(), candidates.end()); // document, then query
+        std::sort(candidates.begin(), candidates.end());
         std::atomic<size_t> gc{0};
         par(W, [&](size_t wid) {
             std::vector<std::pair<const char*, size_t>> words;
@@ -616,6 +596,7 @@ int main(int ac, char** av) {
                         if (z == rw.size()) { hits.push_back((uint64_t(q) << 32) | doc); break; }
                     }
                 }
+                i = gc.load(std::memory_order_relaxed);
             }
         });
         size_t nh = 0;
@@ -623,7 +604,7 @@ int main(int ac, char** av) {
         std::vector<uint64_t> hits;
         hits.reserve(nh);
         for (auto& v : phrase_hits) hits.insert(hits.end(), v.begin(), v.end());
-        std::sort(hits.begin(), hits.end()); // query, then document
+        std::sort(hits.begin(), hits.end());
         for (size_t i = 0; i < hits.size();) {
             uint32_t q = uint32_t(hits[i] >> 32), count = 0, first[10];
             uint64_t sum = 0; size_t j = i;

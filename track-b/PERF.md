@@ -98,3 +98,7 @@ For grouped phrase checks, select the term with lowest indexed document frequenc
 ## Scorer rejection: rare-term phrase anchor — 2026-11-02
 
 Commitb48c450 passed gates but B scored53.898406 points at801.887ms/68,861,952bytes/S860, versus54.816360 at738.064ms/69,558,272bytes/S844 on e45d853. Loss relative to the preceding result: `L=(54.816360-53.898406)*ln(10)/50=+0.0423`. Reverted the anchor-selection change and retained the bounded grouped verifier with exact fallback. The small memory decrease did not compensate for the measured time/source regression. This is a one-run comparison and not a variance-controlled microbenchmark.
+
+## One-tokenization adaptive block builder — 2026-11-02
+
+Replaced the two tokenization/index passes with a newline/document-reference pass followed by one worker-owned pass that builds final32,768-document sparse blocks and promotes dense term blocks directly to bitmaps. It removes the per-thread term/block count matrix and second tokenization/hash pass. Dynamic sparse capacities and per-block metadata may increase memory; promotion and allocation overhead may erase the scan savings. Retained exact term identity, single-writer block ownership, exact Boolean execution, bounded grouped phrase verification and fallback. This candidate derives from the preserved97dc81f implementation; it has no prior scorer measurement. No local build/test was run; correctness and K await the board.
