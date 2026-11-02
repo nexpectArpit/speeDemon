@@ -63,6 +63,31 @@ inline uint64_t hash_bytes(const char* p, size_t len) {
 #endif
 }
 
+inline uint64_t parse_digits(const char*& p, const char* end) {
+    uint64_t value = 0;
+#if defined(__SSE2__)
+    if (end - p >= 8 && p[4] >= '0' && p[4] <= '9') {
+        uint64_t word; memcpy(&word, p, 8);
+        __m128i bytes = _mm_cvtsi64_si128(static_cast<long long>(word));
+        unsigned mask = unsigned(_mm_movemask_epi8(_mm_and_si128(
+            _mm_cmpgt_epi8(bytes, _mm_set1_epi8('0' - 1)),
+            _mm_cmpgt_epi8(_mm_set1_epi8('9' + 1), bytes)))) & 255;
+        unsigned n = mask == 255 ? 8 : unsigned(__builtin_ctz((~mask) & 255));
+        if (n) {
+            uint64_t digits = word & 0x0f0f0f0f0f0f0f0fULL;
+            if (n < 8) digits &= (1ULL << (n * 8)) - 1;
+            digits <<= (8 - n) * 8;
+            digits = (digits * 10 + (digits >> 8)) & 0x00ff00ff00ff00ffULL;
+            digits = (digits * 100 + (digits >> 16)) & 0x0000ffff0000ffffULL;
+            value = uint32_t(digits * 10000 + (digits >> 32));
+            p += n;
+        }
+    }
+#endif
+    while (p < end && *p >= '0' && *p <= '9') value = value * 10 + uint8_t(*p++ - '0');
+    return value;
+}
+
 struct NameArena {
     std::vector<std::unique_ptr<char[]>> blocks;
     size_t used = 0, capacity = 0;
@@ -205,8 +230,7 @@ int main(int ac, char** av) {
         const char* end = bn[wid + 1];
         while (c < end) {
             if (uint8_t(c[0]) == 0xEF && uint8_t(c[1]) == 0xBB && uint8_t(c[2]) == 0xBF) c += 3;
-            uint64_t id = 0;
-            while (*c >= '0' && *c <= '9') id = id * 10 + (*c++ - '0');
+            uint64_t id = parse_digits(c, end);
             ++c; // ','
 
             uint32_t name_len = 0;
@@ -252,16 +276,14 @@ int main(int ac, char** av) {
                 ++c; // empty unquoted note, skip ','
             }
 
-            uint32_t reg = 0;
-            while (*c >= '0' && *c <= '9') reg = reg * 10 + (*c++ - '0');
+            uint32_t reg = uint32_t(parse_digits(c, end));
             ++c; // ','
             uint8_t cid = (reg < 1000000) ? r2c[reg] : uid;
             if (cid == 0xFF) cid = uid;
 
             bool neg = (*c == '-');
             if (neg) ++c;
-            int64_t cts = 0;
-            while (*c >= '0' && *c <= '9') cts = cts * 10 + (*c++ - '0');
+            int64_t cts = int64_t(parse_digits(c, end));
             ++c; // '.'
             cts = cts * 100 + (c[0] - '0') * 10 + (c[1] - '0');
             c += 2;

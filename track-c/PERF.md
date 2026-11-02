@@ -77,3 +77,7 @@ Restored the ultra-fast 13.9 MB BSS architecture: static zero-cost arrays `g_has
 ## Restore exact shared-membership implementation after scorer loss — 2026-11-02
 
 The latest evaluated exact but thread-local-bitmap version on5e14de6 scored57.497567 points at98.709ms/62,377,984bytes/S409. The prior bf0d8c4 implementation preserves exact name-byte verification and shared atomic country membership; it scored67.416 in the supplied board result (66ms/18MB/S397). Restore that measured implementation to recover the large observed loss. Approximate K log-loss of the candidate relative to the prior result is `(57.497567-67.416)*ln(10)/50 = -0.4568`, a substantial expected recovery if reproduced. The newer uncommitted hash-only/shared-bitmap experiment is preserved at `/private/tmp/track-c-wip-20261102.patch` for later review; it was not scored and is not included. No local test was run.
+
+## SIMD decimal conversion candidate — 2026-11-02
+
+Parse row IDs, region IDs and the integer part of the amount with an SSE2 SWAR path when at least five leading digits are available; retain scalar parsing for shorter numbers and remaining digits. The reader is bounded by the worker's record range. This targets repeated decimal accumulation across3.32million records without changing field boundaries or numeric width. Scorer T/K are pending; no local test was run.
