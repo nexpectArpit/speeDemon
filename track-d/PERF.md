@@ -66,3 +66,7 @@ Store common edges in six bytes (uint32 destination,uint16 weight). Reserve65535
 ## Scorer rejection of40ed9a5 — 2026-11-02
 
 User-supplied screenshot: 56.302points versus 57.248 on e6669a4, delta -0.946. Restore the e6669a4 source. A/B code was unchanged between these commits yet its measured times varied, so this observation is not a variance-controlled attribution. B adaptive block storage and A ordered output are retained. No local checks were run.
+
+## Decimal parsing and queue retention candidate — 2026-11-02
+
+On SSE2 x86 builds, classify up to eight bytes for long decimal fields and reduce their digit pairs/groups with integer arithmetic; continue scalar parsing for additional digits and bounded tails. Other targets retain scalar parsing. Keep full uint32 edge values and64-bit distances. At query clear, retain at most2MiB of vector capacity per radix frontier and release excess bucket ownership; active searches can still exceed that amount and allocator RSS release is implementation-dependent. Shared CSR construction atomics and distance-table reset policy remain. This targets loading instruction cost and cumulative queue high-water retention. No local build/test/benchmark was run; score impact is pending.

@@ -201,6 +201,34 @@ int main(int ac, char** av) {
         auto& ag = sh[wid];
         struct L1Entry { uint64_t hash = 0; const char* p = nullptr; uint32_t len = 0; uint32_t slot = 0; };
         L1Entry l1[4096]{};
+
+        struct Pending { const char* name; uint64_t hash; uint32_t len; uint8_t country; uint32_t id; };
+        Pending pending[32];
+        size_t queued = 0;
+        auto flush = [&]() {
+            for (size_t i = 0; i < queued; ++i) {
+                auto& item = pending[i];
+                if (item.len) {
+                    uint32_t index = uint32_t(item.hash ^ (item.hash >> 12)) & 4095;
+                    auto& cached = l1[index];
+                    if (cached.hash == item.hash && cached.len == item.len && !memcmp(cached.p, item.name, item.len)) item.id = cached.slot;
+                    else {
+                        uint32_t slot = get_name_slot(item.name, item.len, item.hash, arenas[wid]);
+                        item.id = g_name_id[slot];
+                        cached = {item.hash, g_name_ptr[slot], item.len, item.id};
+                    }
+                }
+                __builtin_prefetch(&g_country_bits[item.country][item.id >> 6], 1, 3);
+            }
+            for (size_t i = 0; i < queued; ++i) {
+                const auto& item = pending[i];
+                uint64_t mask = 1ULL << (item.id & 63);
+                auto& word = g_country_bits[item.country][item.id >> 6];
+                if (!(word.load(std::memory_order_relaxed) & mask)) word.fetch_or(mask, std::memory_order_relaxed);
+            }
+            queued = 0;
+        };
+
         const char* c = bn[wid];
         const char* end = bn[wid + 1];
         while (c < end) {
@@ -210,28 +238,26 @@ int main(int ac, char** av) {
             ++c; // ','
 
             uint32_t name_len = 0;
-            uint32_t nid = empty_id;
+            const char* name_start = "";
+            uint32_t raw_len = 0;
+            uint64_t nh = 0;
             if (*c == '"') {
                 ++c;
-                const char* name_start = c;
+                name_start = c;
                 uint32_t esc_cnt = 0;
                 while (true) {
                     const char* q = (const char*)memchr(c, '"', end - c);
                     if (q[1] == '"') { ++esc_cnt; c = q + 2; }
                     else { c = q; break; }
                 }
-                uint32_t raw_len = uint32_t(c - name_start);
+                raw_len = uint32_t(c - name_start);
                 name_len = raw_len - esc_cnt;
-                if (raw_len > 0) {
-                    uint64_t nh = hash_bytes(name_start, raw_len);
-                    uint32_t lidx = uint32_t(nh ^ (nh >> 12)) & 4095;
-                    if (l1[lidx].hash == nh && l1[lidx].len == raw_len && !memcmp(l1[lidx].p, name_start, raw_len)) {
-                        nid = l1[lidx].slot;
-                    } else {
-                        uint32_t slot = get_name_slot(name_start, raw_len, nh, arenas[wid]);
-                        nid = g_name_id[slot];
-                        l1[lidx] = {nh, g_name_ptr[slot], raw_len, nid};
-                    }
+                if (raw_len) {
+                    nh = hash_bytes(name_start, raw_len);
+                    uint32_t index = uint32_t(nh ^ (nh >> 32)) & G_MASK;
+                    __builtin_prefetch(&g_hash_keys[index], 0, 3);
+                    __builtin_prefetch(&g_name_len[index], 0, 3);
+                    __builtin_prefetch(&g_name_ptr[index], 0, 3);
                 }
                 c += 2; // skip '"' and ','
             } else {
@@ -269,12 +295,8 @@ int main(int ac, char** av) {
             if (*c == '\r') ++c;
             if (*c == '\n') ++c;
 
-            uint64_t mask = 1ULL << (nid & 63);
-            auto& word = g_country_bits[cid][nid >> 6];
-            uint64_t cur_val = word.load(std::memory_order_relaxed);
-            if (!(cur_val & mask)) {
-                word.fetch_or(mask, std::memory_order_relaxed);
-            }
+            pending[queued++] = {name_start, nh, raw_len, cid, empty_id};
+            if (queued == 32) flush();
             Agg& a = ag[cid];
             a.count++;
             a.id_sum += int64_t(id);
@@ -284,6 +306,7 @@ int main(int ac, char** av) {
             a.name_bytes += name_len;
             a.note_bytes += note_len;
         }
+        flush();
     };
 
     std::vector<std::thread> th;

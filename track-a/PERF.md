@@ -57,3 +57,7 @@ Aggregate using original endpoint IDs and apply lexical order only while emittin
 ## Ordered output retirement candidate — 2026-11-02
 
 Publish completed hour buffers and flush the consecutive completed prefix through one serialized writer during aggregation. Release each written string and the completed hour's selection array immediately. Preserve chronological output; handle partial/interrupted writes. This can reduce output/scratch overlap, but does not guarantee a fixed peak reduction. No local build, test or benchmark was run, per the user's scorer-driven instruction. New T/M/S/K are pending.
+
+## Adaptive four-byte record candidate — 2026-11-02
+
+Encode common records in four bytes:20latency bits,11endpoint-ID bits and one error bit. Reserve the latency marker and store every larger/equal value exactly in an ordered overflow stream, preserving UINT32_MAX. If overflow payload exceeds the six-byte representation after256records, expand that worker/hour buffer into the prior wide format and release compact buffers. Histogram scans decode keys only; scatter decodes full latencies and retires buffers. This targets intermediate storage and bandwidth, not the percentile definition. Spare vector capacity, overflow distribution, decode cost and formatted S can offset the payload gain. No local build/test/benchmark was run under the standing scorer-driven instruction; score impact is pending.

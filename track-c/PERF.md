@@ -69,3 +69,7 @@ Replace separate per-field quote searches with a streaming32-byte field reader. 
 ## Scorer rejection of40ed9a5 — 2026-11-02
 
 User-supplied screenshot: 65.872points versus 67.183 on e6669a4, delta -1.311. Restore the e6669a4 source. A/B code was unchanged between these commits yet its measured times varied, so this observation is not a variance-controlled attribution. B adaptive block storage and A ordered output are retained. No local checks were run.
+
+## Batched exact-name lookup candidate — 2026-11-02
+
+Retain the existing parser, dual hash, exact identity and acquire/release publication. Buffer32name/country memberships per worker while updating ordinary country aggregates. Prefetch initial name-table locations during parsing, resolve names in a batch, prefetch country bitmap words, then publish membership bits in a second batch loop. Flush the final partial batch before worker exit. Scratch is32small descriptors per worker; no dictionary or bitmap replicas are added. The hypothesis is overlapping memory latency with parsing, not fewer total lookups or a proven contention diagnosis. No local build/test/benchmark was run; scorer correctness and K are pending.
