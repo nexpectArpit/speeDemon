@@ -14,14 +14,7 @@
 
 static constexpr uint64_t INF = ~0ULL >> 1;
 
-struct __attribute__((packed)) Edge { uint32_t to; uint16_t w; };
-static_assert(sizeof(Edge) == 6);
-struct LargeWeight { uint32_t index, weight; };
-inline uint32_t edge_weight(const Edge& edge, uint32_t index, const std::vector<LargeWeight>& large) {
-    if (edge.w != 65535) return edge.w;
-    auto p = std::lower_bound(large.begin(), large.end(), index, [](const LargeWeight& a, uint32_t b) { return a.index < b; });
-    return p->weight;
-}
+struct Edge { uint32_t to, w; };
 struct Q { uint32_t s, t; };
 
 struct HP {
@@ -165,7 +158,6 @@ int main(int ac, char** av) {
     std::vector<uint32_t> fc = fo, rc = ro;
 
     std::vector<Edge> fe(m), re(m);
-    std::vector<std::vector<LargeWeight>> forward_large(W), reverse_large(W);
     par(W, [&](size_t w) {
         const char* sc = bn[w], *lim = bn[w + 1];
         while (sc < lim) {
@@ -173,27 +165,13 @@ int main(int ac, char** av) {
             uint32_t u = pu(sc, lim); ++sc; uint32_t v = pu(sc, lim); ++sc; uint32_t wt = pu(sc, lim);
             while (sc < lim && *sc != '\n') ++sc;
             if (sc < lim) ++sc;
-            uint32_t fi = std::atomic_ref<uint32_t>(fc[u]).fetch_add(1, std::memory_order_relaxed);
-            uint32_t ri = std::atomic_ref<uint32_t>(rc[v]).fetch_add(1, std::memory_order_relaxed);
-            uint16_t small = uint16_t(std::min<uint32_t>(wt, 65535));
-            fe[fi] = {v, small}; re[ri] = {u, small};
-            if (wt >= 65535) { forward_large[w].push_back({fi, wt}); reverse_large[w].push_back({ri, wt}); }
+            fe[std::atomic_ref<uint32_t>(fc[u]).fetch_add(1, std::memory_order_relaxed)] = {v, wt};
+            re[std::atomic_ref<uint32_t>(rc[v]).fetch_add(1, std::memory_order_relaxed)] = {u, wt};
         }
     });
     std::vector<uint32_t>().swap(fc);
     std::vector<uint32_t>().swap(rc);
     munmap((void*)graph_base, gs);
-    auto merge_large = [](std::vector<std::vector<LargeWeight>>& parts) {
-        std::vector<LargeWeight> result;
-        size_t count = 0;
-        for (const auto& part : parts) count += part.size();
-        result.reserve(count);
-        for (const auto& part : parts) result.insert(result.end(), part.begin(), part.end());
-        std::sort(result.begin(), result.end(), [](const LargeWeight& a, const LargeWeight& b) { return a.index < b.index; });
-        std::vector<std::vector<LargeWeight>>().swap(parts);
-        return result;
-    };
-    auto fweights = merge_large(forward_large), rweights = merge_large(reverse_large);
 
     const char* qp = map_f(std::string(dd) + "/queries.txt", qsz), *qe = qp + qsz;
     std::vector<Q> qs; qs.reserve(2048);
@@ -228,7 +206,7 @@ int main(int ac, char** av) {
                     auto p = fh.pp(); uint64_t d = p.first; uint32_t u = p.second;
                     if (d >= mu || d > dist.gf(u)) continue;
                     for (uint32_t e = fo[u], en = fo[u + 1]; e < en; ++e) {
-                        uint32_t v = fe[e].to; uint64_t nd = d + edge_weight(fe[e], e, fweights);
+                        uint32_t v = fe[e].to; uint64_t nd = d + fe[e].w;
                         if (nd >= mu) continue;
                         auto& st = dist.get(v);
                         if (nd < st.f) {
@@ -241,7 +219,7 @@ int main(int ac, char** av) {
                     auto p = rh.pp(); uint64_t d = p.first; uint32_t v = p.second;
                     if (d >= mu || d > dist.gr(v)) continue;
                     for (uint32_t e = ro[v], en = ro[v + 1]; e < en; ++e) {
-                        uint32_t u = re[e].to; uint64_t nd = d + edge_weight(re[e], e, rweights);
+                        uint32_t u = re[e].to; uint64_t nd = d + re[e].w;
                         if (nd >= mu) continue;
                         auto& st = dist.get(u);
                         if (nd < st.r) {

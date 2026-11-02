@@ -65,3 +65,7 @@ User-supplied result: 66.938points versus 67.416 on bf0d8c4, delta -0.478. Resto
 ## Streaming structural CSV candidate — 2026-11-02
 
 Replace separate per-field quote searches with a streaming32-byte field reader. AVX2 classifies quote/comma/LF masks together; a prefix parity mask carries quoted-field state between blocks and suppresses quoted delimiters. Count field quotes while consuming masks to derive decoded name/note lengths without copying notes. Keep exact name bytes, the dual hash and acquire/release publication. Handle scalar tails, non-AVX2 builds, empty fields, BOM record prefixes, CRLF and a final record without LF. The existing generator-domain worker-boundary search is retained. No full-file structural index is allocated. No local builds/tests/benchmarks were run, as requested; correctness and K remain scorer-pending. Baseline supplied bf0d8c4 C result:67.416points.
+
+## Scorer rejection of40ed9a5 — 2026-11-02
+
+User-supplied screenshot: 65.872points versus 67.183 on e6669a4, delta -1.311. Restore the e6669a4 source. A/B code was unchanged between these commits yet its measured times varied, so this observation is not a variance-controlled attribution. B adaptive block storage and A ordered output are retained. No local checks were run.

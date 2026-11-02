@@ -62,3 +62,7 @@ User-supplied result: 55.173points versus 56.437 on bf0d8c4, delta -1.264. Resto
 ## Compact CSR edge candidate — 2026-11-02
 
 Store common edges in six bytes (uint32 destination,uint16 weight). Reserve65535 as an exception marker and retain every original weight>=65535 in per-direction sorted edge-index/uint32-weight tables, including65535 itself. Query relaxations use the exact exception value when marked, retaining64-bit distances. Worker-owned exception lists merge after construction. At five million edges per direction the edge-array payload falls from80MB to60MB before exceptions; this is not a measured20MB peak-RSS reduction. Many exceptions or packed-access overhead can erase the gain. Prior degree-counter experiment remains reverted. No local build/test/benchmark was run, as requested; scorer correctness/T/M/S/K are pending. Baseline supplied bf0d8c4 D result:56.437points.
+
+## Scorer rejection of40ed9a5 — 2026-11-02
+
+User-supplied screenshot: 56.302points versus 57.248 on e6669a4, delta -0.946. Restore the e6669a4 source. A/B code was unchanged between these commits yet its measured times varied, so this observation is not a variance-controlled attribution. B adaptive block storage and A ordered output are retained. No local checks were run.
