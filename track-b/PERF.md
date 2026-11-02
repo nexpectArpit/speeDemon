@@ -90,3 +90,7 @@ This is an unmeasured candidate. No local build, test or benchmark was run under
 Board feed generated2026-11-02T12:39:23Z. Track B failed correctness with `exit code -1 signal 11`; T0.879844s/M67,166,208bytes/S844, no K. Build and checker gates passed, but runtime correctness failed. A/C/D scored successfully but all were below stored bests; this commit's B failure rejects the combined candidate.
 
 Diagnosis from code review: workers claimed individual candidate indices and then scanned to the end of that document group. Different workers could start inside the same document group, causing duplicate overlapping work and invalid grouped results. Changed the cursor to compare-exchange complete document-group ranges so a group is claimed atomically by one worker. This is a targeted fix for the identified ownership defect; no local test was run and the fix remains unverified until the next scorer result.
+
+## Rarest-token phrase verification candidate — 2026-11-02
+
+For grouped phrase checks, select the term with lowest indexed document frequency as the anchor. Scan token boundaries for that term and verify only the adjacent phrase window around matching positions. This preserves exact token-by-token matching and uses the same frequencies already used for candidate intersection. It changes no candidate generation or fallback path. Expected benefit is fewer full phrase comparisons, especially when the rare term is not first; scorer T/K are pending. No local test was run.
