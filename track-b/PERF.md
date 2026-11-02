@@ -78,3 +78,9 @@ Replace whole-term32-bit sparse postings and global bitmap/list transitions with
 Construction retains two corpus scans to allocate the final index exactly, with no intermediate hit spool or replay cache. Worker-local block counters become sparse write cursors; document ranges remain64-aligned for exclusive bitmap-word writes. Sparse payload is2bytes per posting; a dense block costs at most8,192bytes for at least4,096members, so posting payload is at most2times total distinct queried memberships. For the profiled22,240,530members this bound is44,481,060bytes, excluding metadata, counters, dictionaries and query scratch. This is an allocation model, not measured peak RSS.
 
 The previous restored B baseline scored52.043points in the user-supplied bf0d8c4 screenshot. No local build, correctness check or benchmark was run for this rewrite, per the user's instruction. Scorer correctness and T/M/S/K are pending. A/C/D implementations are retained.
+
+## Bounded document-grouped phrase candidate — 2026-11-02
+
+Phrase membership candidates are accumulated up to a global cap of262,144 query/document pairs. Accepted candidates are grouped by document; each selected document is tokenized once for all assigned phrases, then matching `(query,document)` pairs are sorted back into query order for exact count/sum/first-ten output. Queries that exceed the shared candidate cap use the original exact per-document phrase verifier. The block index and its construction are unchanged. Candidate storage and hit storage are each bounded by the cap; sorting and per-worker token-boundary scratch add overhead.
+
+This is an unmeasured candidate. No local build, test or benchmark was run under the scorer-driven workflow. Correctness, time, memory, formatted line count, K and board rank are pending the board result; no score gain is claimed.

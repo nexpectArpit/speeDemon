@@ -419,10 +419,14 @@ int main(int ac, char** av) {
     };
     size_t NQ = qs.size();
     std::vector<std::string> res(NQ);
+    constexpr size_t CANDIDATE_LIMIT = 1u << 18;
+    std::atomic<size_t> candidate_count{0};
+    std::vector<std::vector<uint64_t>> phrase_candidates(W), phrase_hits(W);
     std::atomic<size_t> qc{0};
-    par(W, [&](size_t) {
+    par(W, [&](size_t wid) {
         std::vector<uint64_t> cb(1024);
         std::vector<uint16_t> cur, nxt;
+        std::vector<uint32_t> qdocs;
         cur.reserve(DENSE); nxt.reserve(DENSE);
         for (size_t q = qc.fetch_add(1); q < NQ; q = qc.fetch_add(1)) {
             const auto& query = qs[q];
@@ -445,6 +449,7 @@ int main(int ac, char** av) {
                     + 32ULL * __builtin_popcountll(mask & 0xffffffff00000000ULL);
                 while (mask && nfirst < 10) { first[nfirst++] = base + __builtin_ctzll(mask); mask &= mask - 1; }
             };
+            if (query.ph) qdocs.clear();
             std::array<size_t, 16> order{};
             bool absent = false;
             if (query.ph) {
@@ -486,7 +491,7 @@ int main(int ac, char** av) {
                         }
                         cur.resize(out);
                     }
-                    for (uint16_t local : cur) if (phrase_matches(base + local, query)) add(base + local);
+                    for (uint16_t local : cur) qdocs.push_back(base + local);
                     continue;
                 }
                 for (size_t i = 0; i < query.op.size(); ++i) {
@@ -561,6 +566,16 @@ int main(int ac, char** av) {
                     for (size_t w = 0; w < words; ++w) if (cb[w]) summarize(cb[w], base + uint32_t(w * 64));
                 } else for (uint16_t doc : cur) add(base + doc);
             }
+            if (query.ph && !qdocs.empty()) {
+                size_t old = candidate_count.fetch_add(qdocs.size(), std::memory_order_relaxed);
+                if (old + qdocs.size() <= CANDIDATE_LIMIT) {
+                    auto& dst = phrase_candidates[wid];
+                    for (uint32_t doc : qdocs) dst.push_back((uint64_t(doc) << 32) | uint32_t(q));
+                } else {
+                    candidate_count.fetch_sub(qdocs.size(), std::memory_order_relaxed);
+                    for (uint32_t doc : qdocs) if (phrase_matches(doc, query)) add(doc);
+                }
+            }
             char buf[32];
             auto& result = res[q];
             auto number = [&](uint64_t value) { result.append(buf, std::to_chars(buf, buf + 32, value).ptr); };
@@ -568,6 +583,62 @@ int main(int ac, char** av) {
             for (uint32_t i = 0; i < nfirst; ++i) { result += ' '; number(first[i]); }
         }
     });
+    size_t nc = 0;
+    for (const auto& v : phrase_candidates) nc += v.size();
+    if (nc) {
+        std::vector<uint64_t> candidates;
+        candidates.reserve(nc);
+        for (auto& v : phrase_candidates) candidates.insert(candidates.end(), v.begin(), v.end());
+        std::sort(candidates.begin(), candidates.end()); // document, then query
+        std::atomic<size_t> gc{0};
+        par(W, [&](size_t wid) {
+            std::vector<std::pair<const char*, size_t>> words;
+            words.reserve(256);
+            auto& hits = phrase_hits[wid];
+            for (;;) {
+                size_t i = gc.fetch_add(1, std::memory_order_relaxed);
+                if (i == candidates.size()) break;
+                uint32_t doc = uint32_t(candidates[i] >> 32);
+                size_t j = i + 1;
+                while (j < candidates.size() && uint32_t(candidates[j] >> 32) == doc) ++j;
+                words.clear();
+                const char* p = dr[doc].p, *end = p + dr[doc].l;
+                for_each_token(p, end, [&](const char* s, size_t n) { words.emplace_back(s, n); });
+                for (size_t k = i; k < j; ++k) {
+                    uint32_t q = uint32_t(candidates[k]);
+                    const auto& rw = qs[q].rw;
+                    if (rw.size() > words.size()) continue;
+                    for (size_t start = 0; start + rw.size() <= words.size(); ++start) {
+                        size_t z = 0;
+                        for (; z < rw.size(); ++z)
+                            if (words[start + z].second != rw[z].size() ||
+                                !same_word(words[start + z].first, rw[z].data(), rw[z].size())) break;
+                        if (z == rw.size()) { hits.push_back((uint64_t(q) << 32) | doc); break; }
+                    }
+                }
+            }
+        });
+        size_t nh = 0;
+        for (const auto& v : phrase_hits) nh += v.size();
+        std::vector<uint64_t> hits;
+        hits.reserve(nh);
+        for (auto& v : phrase_hits) hits.insert(hits.end(), v.begin(), v.end());
+        std::sort(hits.begin(), hits.end()); // query, then document
+        for (size_t i = 0; i < hits.size();) {
+            uint32_t q = uint32_t(hits[i] >> 32), count = 0, first[10];
+            uint64_t sum = 0; size_t j = i;
+            for (; j < hits.size() && uint32_t(hits[j] >> 32) == q; ++j) {
+                uint32_t doc = uint32_t(hits[j]);
+                if (count < 10) first[count] = doc;
+                ++count; sum += doc;
+            }
+            char buf[32]; std::string result;
+            auto number = [&](uint64_t value) { result.append(buf, std::to_chars(buf, buf + 32, value).ptr); };
+            number(count); result += ' '; number(sum);
+            for (uint32_t k = 0; k < std::min<uint32_t>(count, 10); ++k) { result += ' '; number(first[k]); }
+            res[q] = std::move(result); i = j;
+        }
+    }
     std::string out;
     out.reserve(NQ * 32);
     for (const auto& result : res) { out += result; out += '\n'; }
