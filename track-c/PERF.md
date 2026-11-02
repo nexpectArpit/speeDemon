@@ -61,3 +61,7 @@ On AVX2 builds, reuse a32-byte quote mask across quoted name/note searches. Skip
 ## Scorer rejection of55a8300 — 2026-11-02
 
 User-supplied result: 66.938points versus 67.416 on bf0d8c4, delta -0.478. Restore the bf0d8c4 implementation while retaining Track A's accepted ordered-output change. Acceptance uses scorer K/points with correctness gates; no new local tests or benchmarks were run. These rounded observations do not isolate every cause or estimate run variance.
+
+## Streaming structural CSV candidate — 2026-11-02
+
+Replace separate per-field quote searches with a streaming32-byte field reader. AVX2 classifies quote/comma/LF masks together; a prefix parity mask carries quoted-field state between blocks and suppresses quoted delimiters. Count field quotes while consuming masks to derive decoded name/note lengths without copying notes. Keep exact name bytes, the dual hash and acquire/release publication. Handle scalar tails, non-AVX2 builds, empty fields, BOM record prefixes, CRLF and a final record without LF. The existing generator-domain worker-boundary search is retained. No full-file structural index is allocated. No local builds/tests/benchmarks were run, as requested; correctness and K remain scorer-pending. Baseline supplied bf0d8c4 C result:67.416points.

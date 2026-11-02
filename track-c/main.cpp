@@ -103,6 +103,57 @@ inline uint32_t get_name_slot(const char* s, uint32_t len, uint64_t h, NameArena
     }
 }
 
+struct CsvFields {
+    struct Field { const char* begin; const char* end; uint32_t quotes; };
+    const char* cursor;
+    const char* scan;
+    const char* end;
+    const char* base = nullptr;
+    uint32_t separators = 0, quotes = 0;
+    bool inside = false;
+    Field next() {
+        Field field{cursor, nullptr, 0};
+        while (!separators) {
+            field.quotes += __builtin_popcount(quotes);
+            quotes = 0;
+            if (scan == end) { field.end = end; cursor = end; return field; }
+            base = scan;
+            uint32_t commas = 0, lines = 0;
+            size_t n = std::min<size_t>(32, end - scan);
+#if defined(__AVX2__)
+            if (n == 32) {
+                __m256i v = _mm256_loadu_si256((const __m256i*)scan);
+                quotes = uint32_t(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8('"'))));
+                commas = uint32_t(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(','))));
+                lines = uint32_t(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8('\n'))));
+            } else
+#endif
+            {
+                for (size_t i = 0; i < n; ++i) {
+                    quotes |= uint32_t(scan[i] == '"') << i;
+                    commas |= uint32_t(scan[i] == ',') << i;
+                    lines |= uint32_t(scan[i] == '\n') << i;
+                }
+            }
+            uint32_t parity = quotes;
+            parity ^= parity << 1; parity ^= parity << 2; parity ^= parity << 4;
+            parity ^= parity << 8; parity ^= parity << 16;
+            if (inside) parity = ~parity;
+            inside = (parity >> 31) != 0;
+            separators = (commas | lines) & ~parity;
+            scan += n;
+        }
+        unsigned bit = __builtin_ctz(separators);
+        uint32_t before = (1u << bit) - 1;
+        field.quotes += __builtin_popcount(quotes & before);
+        quotes &= ~before;
+        separators &= separators - 1;
+        field.end = base + bit;
+        cursor = field.end + 1;
+        return field;
+    }
+};
+
 int main(int ac, char** av) {
     const char* dd = ac == 3 ? av[1] : "/data";
     const char* od = ac == 3 ? av[2] : "/out";
@@ -201,73 +252,49 @@ int main(int ac, char** av) {
         auto& ag = sh[wid];
         struct L1Entry { uint64_t hash = 0; const char* p = nullptr; uint32_t len = 0; uint32_t slot = 0; };
         L1Entry l1[4096]{};
-        const char* c = bn[wid];
         const char* end = bn[wid + 1];
-        while (c < end) {
-            if (uint8_t(c[0]) == 0xEF && uint8_t(c[1]) == 0xBB && uint8_t(c[2]) == 0xBF) c += 3;
+        CsvFields csv{bn[wid], bn[wid], end};
+        while (csv.cursor < end) {
+            auto id_field = csv.next();
+            auto name = csv.next();
+            auto note = csv.next();
+            auto region = csv.next();
+            auto amount = csv.next();
+            const char* c = id_field.begin;
+            if (id_field.end - c >= 3 && uint8_t(c[0]) == 0xef && uint8_t(c[1]) == 0xbb && uint8_t(c[2]) == 0xbf) c += 3;
             uint64_t id = 0;
-            while (*c >= '0' && *c <= '9') id = id * 10 + (*c++ - '0');
-            ++c; // ','
-
-            uint32_t name_len = 0;
+            while (c < id_field.end && *c >= '0' && *c <= '9') id = id * 10 + (*c++ - '0');
+            bool quoted = name.begin < name.end && *name.begin == '"';
+            const char* name_start = name.begin + (quoted ? 1 : 0);
+            uint32_t raw_len = uint32_t(name.end - name.begin) - (quoted ? 2 : 0);
+            uint32_t name_len = raw_len - (quoted ? (name.quotes - 2) / 2 : 0);
             uint32_t nid = empty_id;
-            if (*c == '"') {
-                ++c;
-                const char* name_start = c;
-                uint32_t esc_cnt = 0;
-                while (true) {
-                    const char* q = (const char*)memchr(c, '"', end - c);
-                    if (q[1] == '"') { ++esc_cnt; c = q + 2; }
-                    else { c = q; break; }
+            if (raw_len) {
+                uint64_t nh = hash_bytes(name_start, raw_len);
+                uint32_t lidx = uint32_t(nh ^ (nh >> 12)) & 4095;
+                if (l1[lidx].hash == nh && l1[lidx].len == raw_len && !memcmp(l1[lidx].p, name_start, raw_len)) nid = l1[lidx].slot;
+                else {
+                    uint32_t slot = get_name_slot(name_start, raw_len, nh, arenas[wid]);
+                    nid = g_name_id[slot];
+                    l1[lidx] = {nh, g_name_ptr[slot], raw_len, nid};
                 }
-                uint32_t raw_len = uint32_t(c - name_start);
-                name_len = raw_len - esc_cnt;
-                if (raw_len > 0) {
-                    uint64_t nh = hash_bytes(name_start, raw_len);
-                    uint32_t lidx = uint32_t(nh ^ (nh >> 12)) & 4095;
-                    if (l1[lidx].hash == nh && l1[lidx].len == raw_len && !memcmp(l1[lidx].p, name_start, raw_len)) {
-                        nid = l1[lidx].slot;
-                    } else {
-                        uint32_t slot = get_name_slot(name_start, raw_len, nh, arenas[wid]);
-                        nid = g_name_id[slot];
-                        l1[lidx] = {nh, g_name_ptr[slot], raw_len, nid};
-                    }
-                }
-                c += 2; // skip '"' and ','
-            } else {
-                ++c; // empty unquoted name, skip ','
             }
-
-            uint32_t note_len = 0;
-            if (*c == '"') {
-                ++c;
-                while (true) {
-                    const char* q = (const char*)memchr(c, '"', end - c);
-                    note_len += uint32_t(q - c);
-                    if (q[1] == '"') { ++note_len; c = q + 2; }
-                    else { c = q + 1; break; }
-                }
-                ++c; // skip ','
-            } else {
-                ++c; // empty unquoted note, skip ','
-            }
-
+            bool quoted_note = note.begin < note.end && *note.begin == '"';
+            uint32_t note_len = uint32_t(note.end - note.begin);
+            if (quoted_note) note_len -= 2 + (note.quotes - 2) / 2;
+            c = region.begin;
             uint32_t reg = 0;
-            while (*c >= '0' && *c <= '9') reg = reg * 10 + (*c++ - '0');
-            ++c; // ','
-            uint8_t cid = (reg < 1000000) ? r2c[reg] : uid;
-            if (cid == 0xFF) cid = uid;
-
-            bool neg = (*c == '-');
+            while (c < region.end && *c >= '0' && *c <= '9') reg = reg * 10 + (*c++ - '0');
+            uint8_t cid = reg < 1000000 ? r2c[reg] : uid;
+            if (cid == 0xff) cid = uid;
+            c = amount.begin;
+            bool neg = *c == '-';
             if (neg) ++c;
             int64_t cts = 0;
-            while (*c >= '0' && *c <= '9') cts = cts * 10 + (*c++ - '0');
-            ++c; // '.'
+            while (c < amount.end && *c >= '0' && *c <= '9') cts = cts * 10 + (*c++ - '0');
+            ++c;
             cts = cts * 100 + (c[0] - '0') * 10 + (c[1] - '0');
-            c += 2;
             if (neg) cts = -cts;
-            if (*c == '\r') ++c;
-            if (*c == '\n') ++c;
 
             uint64_t mask = 1ULL << (nid & 63);
             auto& word = g_country_bits[cid][nid >> 6];

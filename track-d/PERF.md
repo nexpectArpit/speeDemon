@@ -58,3 +58,7 @@ Replace shared atomic degree increments with per-worker byte counters, reduce th
 ## Scorer rejection of55a8300 — 2026-11-02
 
 User-supplied result: 55.173points versus 56.437 on bf0d8c4, delta -1.264. Restore the bf0d8c4 implementation while retaining Track A's accepted ordered-output change. Acceptance uses scorer K/points with correctness gates; no new local tests or benchmarks were run. These rounded observations do not isolate every cause or estimate run variance.
+
+## Compact CSR edge candidate — 2026-11-02
+
+Store common edges in six bytes (uint32 destination,uint16 weight). Reserve65535 as an exception marker and retain every original weight>=65535 in per-direction sorted edge-index/uint32-weight tables, including65535 itself. Query relaxations use the exact exception value when marked, retaining64-bit distances. Worker-owned exception lists merge after construction. At five million edges per direction the edge-array payload falls from80MB to60MB before exceptions; this is not a measured20MB peak-RSS reduction. Many exceptions or packed-access overhead can erase the gain. Prior degree-counter experiment remains reverted. No local build/test/benchmark was run, as requested; scorer correctness/T/M/S/K are pending. Baseline supplied bf0d8c4 D result:56.437points.
