@@ -80,6 +80,37 @@ struct NameArena {
     }
 };
 
+struct QuoteCursor {
+    const char* scan;
+    const char* end;
+#if defined(__AVX2__)
+    const char* base = nullptr;
+    uint32_t mask = 0;
+#endif
+    const char* next(const char* from) {
+#if defined(__AVX2__)
+        if (from >= scan) { scan = from; mask = 0; }
+        else mask &= ~0u << unsigned(from - base);
+        while (!mask) {
+            if (end - scan < 32) {
+                const char* q = (const char*)memchr(scan, '"', end - scan);
+                scan = q ? q + 1 : end;
+                return q;
+            }
+            base = scan;
+            __m256i v = _mm256_loadu_si256((const __m256i*)scan);
+            mask = uint32_t(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8('"'))));
+            scan += 32;
+        }
+        unsigned bit = __builtin_ctz(mask);
+        mask &= mask - 1;
+        return base + bit;
+#else
+        return (const char*)memchr(from, '"', end - from);
+#endif
+    }
+};
+
 inline uint32_t get_name_slot(const char* s, uint32_t len, uint64_t h, NameArena& arena) {
     uint32_t idx = uint32_t(h ^ (h >> 32)) & G_MASK;
     for (;;) {
@@ -203,6 +234,7 @@ int main(int ac, char** av) {
         L1Entry l1[4096]{};
         const char* c = bn[wid];
         const char* end = bn[wid + 1];
+        QuoteCursor quotes{c, end};
         while (c < end) {
             if (uint8_t(c[0]) == 0xEF && uint8_t(c[1]) == 0xBB && uint8_t(c[2]) == 0xBF) c += 3;
             uint64_t id = 0;
@@ -216,7 +248,7 @@ int main(int ac, char** av) {
                 const char* name_start = c;
                 uint32_t esc_cnt = 0;
                 while (true) {
-                    const char* q = (const char*)memchr(c, '"', end - c);
+                    const char* q = quotes.next(c);
                     if (q[1] == '"') { ++esc_cnt; c = q + 2; }
                     else { c = q; break; }
                 }
@@ -242,7 +274,7 @@ int main(int ac, char** av) {
             if (*c == '"') {
                 ++c;
                 while (true) {
-                    const char* q = (const char*)memchr(c, '"', end - c);
+                    const char* q = quotes.next(c);
                     note_len += uint32_t(q - c);
                     if (q[1] == '"') { ++note_len; c = q + 2; }
                     else { c = q + 1; break; }

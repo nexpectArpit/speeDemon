@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
@@ -187,6 +188,25 @@ struct QItem {
 
 struct DocRef { const char* p; uint32_t l; };
 
+struct PostingMemo {
+    std::unique_ptr<uint8_t[]> bytes;
+    size_t used = 0, limit = 0;
+    bool full = false;
+    void init(size_t capacity) { bytes.reset(new uint8_t[capacity]); limit = capacity; }
+    void put(uint32_t value) {
+        if (full) return;
+        do {
+            if (used == limit) { full = true; return; }
+            uint8_t byte = uint8_t(value & 127); value >>= 7;
+            bytes[used++] = uint8_t(byte | (value ? 128 : 0));
+        } while (value);
+    }
+    static uint32_t read(const uint8_t*& p) {
+        uint32_t value = 0; unsigned shift = 0;
+        for (;;) { uint8_t byte = *p++; value |= uint32_t(byte & 127) << shift; if (!(byte & 128)) return value; shift += 7; }
+    }
+};
+
 template<class F> void par(size_t W, F f) {
     std::vector<std::thread> th;
     for (size_t i = 1; i < W; ++i) th.emplace_back(f, i);
@@ -279,12 +299,15 @@ int main(int ac, char** av) {
     }
 
     std::vector<std::vector<uint32_t>> th_df(W, std::vector<uint32_t>(NT, 0));
+    std::vector<PostingMemo> memos(W);
 
     par(W, [&](size_t wid) {
         const char* sc = bn[wid], * end = bn[wid + 1];
         auto& l_df = th_df[wid];
         std::vector<uint32_t> last_doc(NT, ~0u);
         TokenCache cache;
+        auto& memo = memos[wid];
+        memo.init((size_t(48) << 20) / W);
 
         while (sc < end) {
             uint32_t id = 0;
@@ -296,6 +319,9 @@ int main(int ac, char** av) {
             uint32_t len = uint32_t(nl - ts);
             sc = (nl < end) ? nl + 1 : end;
             dr[id] = {ts, len};
+            size_t checkpoint = memo.used;
+            bool remember = !memo.full;
+            if (remember) memo.put(id + 1);
 
             for_each_token(ts, ts + len, [&](const char* tok_st, size_t tl) {
                 if (tl <= 32) {
@@ -303,9 +329,14 @@ int main(int ac, char** av) {
                     if (tid != ~0u && last_doc[tid] != id) {
                         last_doc[tid] = id;
                         l_df[tid]++;
+                        if (remember) memo.put(tid + 1);
                     }
                 }
                         });
+            if (remember) {
+                memo.put(0);
+                if (memo.full) memo.used = checkpoint;
+            }
         }
     });
 
@@ -349,6 +380,22 @@ int main(int ac, char** av) {
         std::vector<uint32_t> last_doc(NT, ~0u);
         TokenCache cache;
 
+        auto emit = [&](uint32_t tid, uint32_t id) {
+            uint32_t bs_id = bitset_map[tid];
+            if (bs_id != ~0u) bitsets[bs_id][id >> 6] |= 1ULL << (id & 63);
+            else all_postings[l_off[tid]++] = id;
+        };
+        auto& memo = memos[wid];
+        const uint8_t* mp = memo.bytes.get();
+        const uint8_t* me = mp + memo.used;
+        while (mp < me) {
+            uint32_t id = PostingMemo::read(mp) - 1, term;
+            while ((term = PostingMemo::read(mp))) emit(term - 1, id);
+            sc = dr[id].p + dr[id].l;
+            if (sc < end) ++sc;
+        }
+        memo.bytes.reset();
+
         while (sc < end) {
             uint32_t id = 0;
             while (*sc >= '0' && *sc <= '9') id = id * 10 + (*sc++ - '0');
@@ -358,12 +405,7 @@ int main(int ac, char** av) {
                     uint32_t tid = cache.lookup(dt, dp, tok_st, tl);
                     if (tid != ~0u && last_doc[tid] != id) {
                         last_doc[tid] = id;
-                        uint32_t bs_id = bitset_map[tid];
-                        if (bs_id != ~0u) {
-                            bitsets[bs_id][id >> 6] |= 1ULL << (id & 63);
-                        } else {
-                            all_postings[l_off[tid]++] = id;
-                        }
+                        emit(tid, id);
                     }
                 }
                         });

@@ -53,3 +53,7 @@ Pinned organizer C++ formatter/scc reports S=297 (baseline board S=304); D=1 dec
 ## Combined scorer candidate — 2026-11-02
 
 Aggregate using original endpoint IDs and apply lexical order only while emitting groups, removing two per-record remapping lookups. Allocate the latency scatter buffer without zero initialization because every element is assigned before selection. Use the calling thread as one worker in both phases, avoiding two extra thread launches. These are code changes, not measured performance gains. Local builds, tests and benchmarks were explicitly skipped at the user's request; evaluation is pending.
+
+## Ordered output retirement candidate — 2026-11-02
+
+Publish completed hour buffers and flush the consecutive completed prefix through one serialized writer during aggregation. Release each written string and the completed hour's selection array immediately. Preserve chronological output; handle partial/interrupted writes. This can reduce output/scratch overlap, but does not guarantee a fixed peak reduction. No local build, test or benchmark was run, per the user's scorer-driven instruction. New T/M/S/K are pending.

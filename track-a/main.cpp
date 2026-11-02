@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
+#include <cerrno>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
@@ -156,6 +158,11 @@ int main(int ac, char** av) {
     }
 
     std::array<std::string, H> ob;
+    std::array<std::atomic<bool>, H> ready{};
+    std::mutex output_mutex;
+    size_t next_output = 0;
+    int ofd = open((std::string(od) + "/summary.txt").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (ofd < 0) return 1;
     std::atomic<size_t> hc{0};
     auto aggregate_worker = [&]() {
             for (size_t h = hc.fetch_add(1); h < H; h = hc.fetch_add(1)) {
@@ -205,16 +212,26 @@ int main(int ac, char** av) {
                     buf.append(b, std::to_chars(b, b + 32, err_cnt).ptr); buf += ' ';
                     buf.append(b, std::to_chars(b, b + 32, ppm).ptr); buf += '\n';
                 }
+                latencies.reset();
+                ready[h].store(true, std::memory_order_release);
+                std::lock_guard<std::mutex> lock(output_mutex);
+                while (next_output < H && ready[next_output].load(std::memory_order_acquire)) {
+                    auto& out = ob[next_output++];
+                    size_t sent = 0;
+                    while (sent < out.size()) {
+                        ssize_t n = write(ofd, out.data() + sent, out.size() - sent);
+                        if (n > 0) sent += size_t(n);
+                        else if (n < 0 && errno == EINTR) continue;
+                        else _exit(1);
+                    }
+                    std::string().swap(out);
+                }
             }
     };
     for (size_t w = 1; w < W; ++w) th.emplace_back(aggregate_worker);
     aggregate_worker();
     for (auto& t : th) t.join();
 
-    int ofd = open((std::string(od) + "/summary.txt").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    for (size_t h = 0; h < H; ++h) {
-        if (!ob[h].empty()) [[maybe_unused]] auto wr = write(ofd, ob[h].data(), ob[h].size());
-    }
     close(ofd);
 
     _exit(0);

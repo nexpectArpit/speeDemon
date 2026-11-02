@@ -53,3 +53,7 @@ Place each name's hash, byte pointer and published length/ID together in a24-byt
 ## Restore prior exact lookup — 2026-11-02
 
 User-supplied board results for d1865fc: T≈0.085s, M≈19.0MB, S412,64.259points. Restore the exact-name dictionary layout and dual CRC/multiplicative hash from1dcbdb5, including persistent arenas, acquire/release publication and dense name IDs. This reverts both experimental changes together; the supplied timing does not isolate hashing, layout or contention as the cause. The restored version scored67.213points in the supplied1dcbdb5 snapshot. The70.200point historical implementation had a reproduced race and is not restored. No new local execution was run, as requested.
+
+## Batched quote scanning candidate — 2026-11-02
+
+On AVX2 builds, reuse a32-byte quote mask across quoted name/note searches. Skip consumed escape quotes and numeric-field gaps using the next requested byte position; preserve existing decoded-length accounting and exact name publication/equality. Short tails and non-AVX2 builds use memchr. This is a batched quote scanner, not a complete replacement CSV parser. No local build, test or benchmark was run; score impact is pending.

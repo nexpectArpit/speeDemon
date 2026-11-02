@@ -62,3 +62,7 @@ The one-pass B change is included in the combined four-track candidate. Its earl
 ## Restore bounded construction — 2026-11-02
 
 User-supplied board results for d1865fc: T≈0.895s, M≈281.5MB, S752,47.029points. Remove the intermediate64-bit hit spool and restore the direct two-pass index construction from1dcbdb5. This avoids retaining every queried-term/document pair alongside the final index. Exact dictionary identity, aligned single-writer bitmap ranges, dense-anchor enumeration and word-level result aggregation remain. The earlier commit scored52.239points on the supplied board snapshot; this is historical evidence, not a guaranteed score for this combined commit. No new local execution was run, as requested.
+
+## Bounded compressed replay candidate — 2026-11-02
+
+Cache the first pass's distinct queried-term/document memberships as variable-byte IDs with per-document delimiters, under a fixed48MiB total allocation budget divided among workers. Cache only complete document prefixes: roll back a partial document when the budget fills. During construction, replay the cached prefix directly and tokenize only the uncached suffix. Release each worker's cache before scanning its suffix. This retains exact sparse/dense index semantics and avoids the unbounded64-bit hit spool. The cache cap is not a total-process memory cap; final index and other state coexist with it. Extra encoding work, increased peak memory and formatted source must be repaid by lower scorer T. No local build, test or benchmark was run; score impact is pending.

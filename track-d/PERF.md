@@ -50,3 +50,7 @@ Bounded independent verification:3731 oracle queries +120 unseen-generator queri
 ## Combined scorer candidate — 2026-11-02
 
 Store radix queue items in12 bytes instead of a16-byte pair. Prune relaxations whose tentative distance cannot improve the known path upper bound, and reuse one distance-table lookup for comparison and update. Both directions retain the same shortest-path termination rule and exact64-bit distances. These are code changes, not measured performance gains. Local builds, tests and benchmarks were explicitly skipped at the user's request; evaluation is pending.
+
+## Worker-owned degree counting candidate — 2026-11-02
+
+Replace shared atomic degree increments with per-worker byte counters, reduce them into the global forward/reverse degrees, and release counter ownership before CSR edge allocation. Record every byte-counter wrap and add256 during reduction, preserving high-degree vertices exactly. At n=1,740,512 and12 workers the counter payload is41,772,288bytes, excluding the construction prototype and overflow metadata. CSR scatter still uses atomic cursors. This exchanges temporary memory and a reduction pass for removing two shared atomic updates per input edge. Allocator return to the OS and a score gain are not guaranteed. No local build, test or benchmark was run; scorer results are pending.
