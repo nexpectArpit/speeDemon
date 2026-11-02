@@ -84,3 +84,9 @@ The previous restored B baseline scored52.043points in the user-supplied bf0d8c4
 Phrase membership candidates are accumulated up to a global cap of262,144 query/document pairs. Accepted candidates are grouped by document; each selected document is tokenized once for all assigned phrases, then matching `(query,document)` pairs are sorted back into query order for exact count/sum/first-ten output. Queries that exceed the shared candidate cap use the original exact per-document phrase verifier. The block index and its construction are unchanged. Candidate storage and hit storage are each bounded by the cap; sorting and per-worker token-boundary scratch add overhead.
 
 This is an unmeasured candidate. No local build, test or benchmark was run under the scorer-driven workflow. Correctness, time, memory, formatted line count, K and board rank are pending the board result; no score gain is claimed.
+
+## Scorer rejection: 91a10dd — 2026-11-02
+
+Board feed generated2026-11-02T12:39:23Z. Track B failed correctness with `exit code -1 signal 11`; T0.879844s/M67,166,208bytes/S844, no K. Build and checker gates passed, but runtime correctness failed. A/C/D scored successfully but all were below stored bests; this commit's B failure rejects the combined candidate.
+
+Diagnosis from code review: workers claimed individual candidate indices and then scanned to the end of that document group. Different workers could start inside the same document group, causing duplicate overlapping work and invalid grouped results. Changed the cursor to compare-exchange complete document-group ranges so a group is claimed atomically by one worker. This is a targeted fix for the identified ownership defect; no local test was run and the fix remains unverified until the next scorer result.

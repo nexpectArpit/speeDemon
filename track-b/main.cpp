@@ -595,12 +595,12 @@ int main(int ac, char** av) {
             std::vector<std::pair<const char*, size_t>> words;
             words.reserve(256);
             auto& hits = phrase_hits[wid];
-            for (;;) {
-                size_t i = gc.fetch_add(1, std::memory_order_relaxed);
-                if (i == candidates.size()) break;
+            size_t i = gc.load(std::memory_order_relaxed);
+            while (i < candidates.size()) {
                 uint32_t doc = uint32_t(candidates[i] >> 32);
                 size_t j = i + 1;
                 while (j < candidates.size() && uint32_t(candidates[j] >> 32) == doc) ++j;
+                if (!gc.compare_exchange_weak(i, j, std::memory_order_relaxed)) continue;
                 words.clear();
                 const char* p = dr[doc].p, *end = p + dr[doc].l;
                 for_each_token(p, end, [&](const char* s, size_t n) { words.emplace_back(s, n); });
