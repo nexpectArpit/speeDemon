@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <cstdint>
@@ -17,36 +18,36 @@ struct Edge { uint32_t to, w; };
 struct Q { uint32_t s, t; };
 
 struct HP {
-    std::vector<std::pair<uint64_t, uint32_t>> d;
-    HP() { d.reserve(4096); }
-    void ps(uint64_t w, uint32_t u) {
-        size_t i = d.size();
-        d.push_back({w, u});
-        for (; i > 0; ) {
-            size_t p = (i - 1) >> 2;
-            if (d[i].first >= d[p].first) break;
-            std::swap(d[i], d[p]);
-            i = p;
-        }
+    using Item = std::pair<uint64_t, uint32_t>;
+    std::array<std::vector<Item>, 65> buckets;
+    uint64_t last = 0;
+    size_t count = 0;
+    static unsigned index(uint64_t v) { return v ? 64 - __builtin_clzll(v) : 0; }
+    void ps(uint64_t d, uint32_t u) {
+        buckets[index(d ^ last)].push_back({d, u});
+        ++count;
     }
-    auto pp() {
-        auto t = d[0], b = d.back();
-        d.pop_back();
-        if (!d.empty()) {
-            size_t i = 0, n = d.size();
-            for (;;) {
-                size_t c0 = (i << 2) + 1;
-                if (c0 >= n) break;
-                size_t s = c0, ce = std::min(n, c0 + 4);
-                for (size_t c = c0 + 1; c < ce; ++c)
-                    if (d[c].first < d[s].first) s = c;
-                if (d[s].first >= b.first) break;
-                d[i] = d[s];
-                i = s;
-            }
-            d[i] = b;
-        }
-        return t;
+    void prepare() {
+        if (!buckets[0].empty()) return;
+        unsigned i = 1;
+        while (buckets[i].empty()) ++i;
+        last = INF;
+        for (const auto& p : buckets[i]) last = std::min(last, p.first);
+        for (const auto& p : buckets[i]) buckets[index(p.first ^ last)].push_back(p);
+        buckets[i].clear();
+    }
+    uint64_t min() { prepare(); return last; }
+    Item pp() {
+        prepare();
+        Item p = buckets[0].back();
+        buckets[0].pop_back();
+        --count;
+        return p;
+    }
+    void clear() {
+        for (auto& bucket : buckets) bucket.clear();
+        last = 0;
+        count = 0;
     }
 };
 
@@ -92,7 +93,7 @@ struct DS {
         return INF;
     }
     void clear() {
-        if (tb.size() > 65536) { std::vector<Slot>(4096).swap(tb); us.clear(); return; }
+        if (tb.size() > 65536) { std::vector<Slot>(4096).swap(tb); std::vector<uint32_t>().swap(us); return; }
         for (uint32_t x : us) tb[x] = Slot{};
         us.clear();
     }
@@ -122,6 +123,7 @@ int main(int ac, char** av) {
     };
     size_t gs = 0, qsz = 0;
     const char* gp = map_f(std::string(dd) + "/graph.txt", gs), *ge = gp + gs;
+    const char* graph_base = gp;
     uint32_t n = pu(gp, ge); ++gp; uint32_t m = pu(gp, ge);
     while (gp < ge && *gp != '\n') ++gp;
     if (gp < ge) ++gp;
@@ -168,7 +170,7 @@ int main(int ac, char** av) {
     });
     std::vector<uint32_t>().swap(fc);
     std::vector<uint32_t>().swap(rc);
-    munmap((void*)bn[0], gs);
+    munmap((void*)graph_base, gs);
 
     const char* qp = map_f(std::string(dd) + "/queries.txt", qsz), *qe = qp + qsz;
     std::vector<Q> qs; qs.reserve(2048);
@@ -195,10 +197,10 @@ int main(int ac, char** av) {
             fh.ps(0, s); rh.ps(0, t);
             uint64_t mu = INF;
 
-            while (!fh.d.empty() && !rh.d.empty()) {
-                uint64_t fm = fh.d[0].first, rm = rh.d[0].first;
+            while (fh.count && rh.count) {
+                uint64_t fm = fh.min(), rm = rh.min();
                 if (fm + rm >= mu) break;
-                bool gf = (fh.d.size() * 4 < rh.d.size()) ? true : (rh.d.size() * 4 < fh.d.size()) ? false : (fm <= rm);
+                bool gf = (fh.count * 4 < rh.count) ? true : (rh.count * 4 < fh.count) ? false : (fm <= rm);
                 if (gf) {
                     auto [d, u] = fh.pp();
                     if (d >= mu || d > dist.gf(u)) continue;
@@ -224,7 +226,7 @@ int main(int ac, char** av) {
                 }
             }
             ans[q] = (mu == INF) ? -1 : int64_t(mu);
-            dist.clear(); fh.d.clear(); rh.d.clear();
+            dist.clear(); fh.clear(); rh.clear();
         }
     });
 

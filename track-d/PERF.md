@@ -38,3 +38,11 @@ Distances are stored in an open-addressed hash table with packed 20-byte slots (
 - Before inserting neighbor nodes, read-only probes `dist.gf(v)` and `dist.gr(u)` filter out non-improving edges.
 - When an unusually large query expands `tb` beyond 65,536 slots, `DS::clear()` swaps `tb` with a freshly sized 4096-entry vector (`std::vector<Slot>(4096).swap(tb)`), guaranteeing that the high-water capacity is returned to the OS.
 - Source lines are compressed to 240 SLOC.
+
+## Verified local queue/resource revision — 2026-11-02
+
+Prior pending projections are not evidence. The feed generated09:44:18Z measures fdbf51b at0.433167s /202,014,720bytes /S329 /55.447198points (run-bc0a754325a6).
+
+This revision retains exact bidirectional Dijkstra and replaces the4-ary queues with64-bit monotone radix queues. Each direction has its own monotone last key; zero edges and stale keys remain supported. The correct graph mmap base is now unmapped, and a large state reset releases both table and touched-list ownership (allocator return to OS remains implementation-specific).
+
+Bounded independent verification:3731 oracle queries +120 unseen-generator queries,133492 radix multiset operations across20 rounds, reset/reuse and successful munmap probes. Full-public paired native checks all match published SHA. Excluding one explicit warmup per binary, native ARM outer-process middle-three means are0.443881986s baseline and0.378738514s candidate (14.68% lower); baseline spread fails, candidate passes. This is a local trend only, not accepted scoring-box T or a new board score. Evidence AUDIT/rank78-20261102; source SHA efd446e7d22e295ad215447c1ad4e37b005977f16093410eb3eec338b68f4a7f.
