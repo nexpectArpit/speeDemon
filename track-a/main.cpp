@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
@@ -105,8 +106,7 @@ int main(int ac, char** av) {
     std::vector<std::array<std::vector<Rec>, H>> th_recs(W);
     std::vector<std::thread> th;
 
-    for (size_t w = 0; w < W; ++w) {
-        th.emplace_back([&, w]() {
+    auto parse_worker = [&](size_t w) {
             auto& recs = th_recs[w];
             const char* c = bn[w], *e = bn[w + 1];
             struct L1EP { const char* p = nullptr; uint16_t l = 0, id = 0; } l1[2048]{};
@@ -133,8 +133,9 @@ int main(int ac, char** av) {
                 ++c;
                 recs[h].push_back({lat, uint16_t(ei | (is_err ? 0x8000 : 0))});
             }
-        });
-    }
+    };
+    for (size_t w = 1; w < W; ++w) th.emplace_back(parse_worker, w);
+    parse_worker(0);
     for (auto& t : th) t.join();
     th.clear();
 
@@ -144,8 +145,6 @@ int main(int ac, char** av) {
     std::sort(sorted_order.begin(), sorted_order.end(), [&](uint16_t a, uint16_t b) {
         return g_dict.ep_strings[a] < g_dict.ep_strings[b];
     });
-    std::vector<uint16_t> old_to_sorted(num_ep);
-    for (uint16_t i = 0; i < num_ep; ++i) old_to_sorted[sorted_order[i]] = i;
 
     std::array<std::string, H> gh;
     {
@@ -158,29 +157,30 @@ int main(int ac, char** av) {
 
     std::array<std::string, H> ob;
     std::atomic<size_t> hc{0};
-    for (size_t w = 0; w < W; ++w) {
-        th.emplace_back([&]() {
+    auto aggregate_worker = [&]() {
             for (size_t h = hc.fetch_add(1); h < H; h = hc.fetch_add(1)) {
                 std::vector<uint32_t> counts(num_ep), errors(num_ep), starts(num_ep + 1);
                 for (size_t w = 0; w < W; ++w) {
                     for (const auto& rec : th_recs[w][h]) {
-                        uint16_t id = old_to_sorted[rec.ep_err & 0x7fff];
+                        uint16_t id = rec.ep_err & 0x7fff;
                         ++counts[id];
                         errors[id] += rec.ep_err >> 15;
                     }
                 }
                 for (size_t i = 0; i < num_ep; ++i) starts[i + 1] = starts[i] + counts[i];
-                std::vector<uint32_t> latencies(starts.back()), positions = starts;
+                std::unique_ptr<uint32_t[]> latencies(new uint32_t[starts.back()]);
+                std::vector<uint32_t> positions = starts;
                 for (size_t w = 0; w < W; ++w) {
                     for (const auto& rec : th_recs[w][h])
-                        latencies[positions[old_to_sorted[rec.ep_err & 0x7fff]]++] = rec.lat;
+                        latencies[positions[rec.ep_err & 0x7fff]++] = rec.lat;
                     std::vector<Rec>().swap(th_recs[w][h]);
                 }
                 auto& buf = ob[h]; buf.reserve(num_ep * 85); char b[32];
                 for (uint16_t s_id = 0; s_id < num_ep; ++s_id) {
-                    uint32_t cnt = counts[s_id];
+                    uint16_t id = sorted_order[s_id];
+                    uint32_t cnt = counts[id];
                     if (!cnt) continue;
-                    uint32_t* v = latencies.data() + starts[s_id];
+                    uint32_t* v = latencies.get() + starts[id];
                     size_t r50 = (50ULL * cnt + 99) / 100 - 1, r95 = (95ULL * cnt + 99) / 100 - 1, r99 = (99ULL * cnt + 99) / 100 - 1;
                     uint32_t p50, p95, p99;
                     if (cnt <= 64) {
@@ -193,7 +193,7 @@ int main(int ac, char** av) {
                         else if (r99 > r95) { std::nth_element(v + r95 + 1, v + r99, v + cnt); p99 = v[r99]; }
                         else p99 = p95;
                     }
-                    uint32_t err_cnt = errors[s_id];
+                    uint32_t err_cnt = errors[id];
                     uint64_t ppm = (uint64_t(err_cnt) * 1000000ULL) / cnt;
 
                     buf.append(gh[h]); buf += ' ';
@@ -206,8 +206,9 @@ int main(int ac, char** av) {
                     buf.append(b, std::to_chars(b, b + 32, ppm).ptr); buf += '\n';
                 }
             }
-        });
-    }
+    };
+    for (size_t w = 1; w < W; ++w) th.emplace_back(aggregate_worker);
+    aggregate_worker();
     for (auto& t : th) t.join();
 
     int ofd = open((std::string(od) + "/summary.txt").c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);

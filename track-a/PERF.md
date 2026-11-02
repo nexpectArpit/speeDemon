@@ -49,3 +49,7 @@ This revision replaces the serial full-record histogram/scatter with independent
 The fresh independent verifier rebound all eight official Track A tests to this binary, plus separate oracle/sanitizer and concurrent cases. Full public output matches the published SHA. Native ARM macOS five-run outer-process middle-three means were 0.072457695 s baseline and 0.052870764 s candidate (27.03% lower). These are local trends, including process launch; first runs have cold executable effects and are not board T. Docker's earlier hour-task variant passed ten full hashes but both timing spreads failed; no accepted Docker speed claim.
 
 Pinned organizer C++ formatter/scc reports S=297 (baseline board S=304); D=1 declared/unverified. Current source SHA256 4021f5a815b7aef7b7b7f56364b6698658f23939a025a728743284494d81db71. No fresh board result exists. Raw evidence and reviewer reports are outside the build context under AUDIT/rank78-20261102.
+
+## Combined scorer candidate — 2026-11-02
+
+Aggregate using original endpoint IDs and apply lexical order only while emitting groups, removing two per-record remapping lookups. Allocate the latency scatter buffer without zero initialization because every element is assigned before selection. Use the calling thread as one worker in both phases, avoiding two extra thread launches. These are code changes, not measured performance gains. Local builds, tests and benchmarks were explicitly skipped at the user's request; evaluation is pending.

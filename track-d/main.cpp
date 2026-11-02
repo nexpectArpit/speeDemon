@@ -18,7 +18,8 @@ struct Edge { uint32_t to, w; };
 struct Q { uint32_t s, t; };
 
 struct HP {
-    using Item = std::pair<uint64_t, uint32_t>;
+    struct __attribute__((packed)) Item { uint64_t first; uint32_t second; };
+    static_assert(sizeof(Item) == 12);
     std::array<std::vector<Item>, 65> buckets;
     uint64_t last = 0;
     size_t count = 0;
@@ -32,7 +33,7 @@ struct HP {
         unsigned i = 1;
         while (buckets[i].empty()) ++i;
         last = INF;
-        for (const auto& p : buckets[i]) last = std::min(last, p.first);
+        for (const auto& p : buckets[i]) last = std::min(last, uint64_t(p.first));
         for (const auto& p : buckets[i]) buckets[index(p.first ^ last)].push_back(p);
         buckets[i].clear();
     }
@@ -202,23 +203,27 @@ int main(int ac, char** av) {
                 if (fm + rm >= mu) break;
                 bool gf = (fh.count * 4 < rh.count) ? true : (rh.count * 4 < fh.count) ? false : (fm <= rm);
                 if (gf) {
-                    auto [d, u] = fh.pp();
+                    auto p = fh.pp(); uint64_t d = p.first; uint32_t u = p.second;
                     if (d >= mu || d > dist.gf(u)) continue;
                     for (uint32_t e = fo[u], en = fo[u + 1]; e < en; ++e) {
                         uint32_t v = fe[e].to; uint64_t nd = d + fe[e].w;
-                        if (nd < dist.gf(v)) {
-                            auto& st = dist.get(v); st.f = nd;
+                        if (nd >= mu) continue;
+                        auto& st = dist.get(v);
+                        if (nd < st.f) {
+                            st.f = nd;
                             if (st.r != INF && nd + st.r < mu) mu = nd + st.r;
                             fh.ps(nd, v);
                         }
                     }
                 } else {
-                    auto [d, v] = rh.pp();
+                    auto p = rh.pp(); uint64_t d = p.first; uint32_t v = p.second;
                     if (d >= mu || d > dist.gr(v)) continue;
                     for (uint32_t e = ro[v], en = ro[v + 1]; e < en; ++e) {
                         uint32_t u = re[e].to; uint64_t nd = d + re[e].w;
-                        if (nd < dist.gr(u)) {
-                            auto& st = dist.get(u); st.r = nd;
+                        if (nd >= mu) continue;
+                        auto& st = dist.get(u);
+                        if (nd < st.r) {
+                            st.r = nd;
                             if (st.f != INF && st.f + nd < mu) mu = st.f + nd;
                             rh.ps(nd, u);
                         }
